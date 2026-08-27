@@ -85,10 +85,24 @@ async function getMeta(id, type) {
     return null;
 }
 
-// Deep Scrape: Find the actual download link from a post page
-async function findDownloadLink(postUrl) {
+// Deep Scrape: Find the actual download link from a post page with IMDb ID verification
+async function findDownloadLink(postUrl, targetImdbId = null) {
     try {
         const { data } = await httpClient.get(postUrl);
+        
+        // IMDb Verification: If targetImdbId is provided, check if post links to a DIFFERENT IMDb title
+        if (targetImdbId) {
+            const pageImdbMatch = data.match(/imdb\.com\/title\/(tt\d+)/i);
+            if (pageImdbMatch) {
+                const pageImdbId = pageImdbMatch[1].toLowerCase();
+                if (pageImdbId !== targetImdbId.toLowerCase()) {
+                    console.log(`[IMDb MISMATCH] Post ${postUrl} is for ${pageImdbId}, expected ${targetImdbId}. Skipping.`);
+                    return null;
+                }
+                console.log(`[IMDb VERIFIED] Post ${postUrl} matches IMDb ID ${targetImdbId}`);
+            }
+        }
+        
         const $ = cheerio.load(data);
         let downloadLink = null;
         
@@ -99,7 +113,7 @@ async function findDownloadLink(postUrl) {
             return `${urlObj.protocol}//${urlObj.host}/${wpdmdlMatch[0]}`;
         }
         
-        // Strategy 2: Look for specific download path (used by TeamGOAT)
+        // Strategy 2: Look for specific download path (used by TeamGOAT & MovieMirror)
         $('a').each((i, el) => {
             const href = $(el).attr('href');
             if (href && (href.includes('/download/') || href.includes('custom_download') || href.endsWith('.zip') || href.endsWith('.srt'))) {
@@ -120,7 +134,7 @@ async function findDownloadLink(postUrl) {
     return null;
 }
 
-async function searchSite(title, urlTemplate, siteName) {
+async function searchSite(title, urlTemplate, siteName, imdbId = null) {
     const results = [];
     try {
         const searchUrl = urlTemplate.replace('{query}', encodeURIComponent(title));
@@ -148,9 +162,8 @@ async function searchSite(title, urlTemplate, siteName) {
             }
         }
         
-        const topResult = unique[0];
-        if (topResult) {
-            const dlLink = await findDownloadLink(topResult.url);
+        for (let topResult of unique) {
+            const dlLink = await findDownloadLink(topResult.url, imdbId);
             if (dlLink) {
                 console.log(`[SUCCESS] [${siteName}] Found subtitle for "${title}" -> ${dlLink}`);
                 return {
@@ -170,6 +183,7 @@ async function searchSite(title, urlTemplate, siteName) {
 }
 
 async function searchTeamGoat(meta, type, id) {
+    const imdbId = id.split(':')[0];
     const seasonMatch = id.match(/:(\d+):\d+$/);
     const season = seasonMatch ? seasonMatch[1] : null;
     
@@ -185,7 +199,7 @@ async function searchTeamGoat(meta, type, id) {
     
     try {
         console.log(`[TeamGOAT] Checking direct URL (Strategy 1): ${url}`);
-        const dlLink = await findDownloadLink(url);
+        const dlLink = await findDownloadLink(url, imdbId);
         if (dlLink) {
             console.log(`[SUCCESS] [TeamGOAT] Found subtitle for "${meta.title}" -> ${dlLink}`);
             return {
@@ -204,7 +218,7 @@ async function searchTeamGoat(meta, type, id) {
             `https://malayalamsubtitles.in/release/${slug}-season${season}/` :
             `https://malayalamsubtitles.in/release/${slug}/`;
         console.log(`[TeamGOAT] Checking direct URL (Strategy 2): ${fallbackUrl}`);
-        const dlLink = await findDownloadLink(fallbackUrl);
+        const dlLink = await findDownloadLink(fallbackUrl, imdbId);
         if (dlLink) {
             console.log(`[SUCCESS] [TeamGOAT] Found subtitle for "${meta.title}" -> ${dlLink}`);
             return {
@@ -242,7 +256,7 @@ async function searchTeamGoat(meta, type, id) {
             if (!matchUrl.startsWith('http')) {
                 matchUrl = `https://malayalamsubtitles.in${matchUrl.startsWith('/') ? '' : '/'}${matchUrl}`;
             }
-            const dlLink = await findDownloadLink(matchUrl);
+            const dlLink = await findDownloadLink(matchUrl, imdbId);
             if (dlLink) {
                 console.log(`[SUCCESS] [TeamGOAT] Found subtitle for "${meta.title}" -> ${dlLink}`);
                 return {
@@ -262,7 +276,7 @@ async function searchTeamGoat(meta, type, id) {
     return null;
 }
 
-async function searchMovieMirror(title) {
+async function searchMovieMirror(title, imdbId = null) {
     try {
         const cleanQuery = title.replace(/\./g, '');
         const searchUrl = `https://moviemirrorsubtitles.com/wp-json/wp/v2/posts?search=${encodeURIComponent(cleanQuery)}`;
@@ -270,17 +284,19 @@ async function searchMovieMirror(title) {
         const { data } = await httpClient.get(searchUrl);
         
         if (data && data.length > 0) {
-            const postUrl = data[0].link;
-            const dlLink = await findDownloadLink(postUrl);
-            if (dlLink) {
-                console.log(`[SUCCESS] [Movie Mirror] Found subtitle for "${title}" -> ${dlLink}`);
-                return {
-                    id: 'MovieMirror_' + encodeURIComponent(title),
-                    url: dlLink,
-                    lang: 'Malayalam',
-                    name: `[Movie Mirror] Malayalam - ${title}`,
-                    title: "Movie Mirror"
-                };
+            for (let post of data) {
+                const postUrl = post.link;
+                const dlLink = await findDownloadLink(postUrl, imdbId);
+                if (dlLink) {
+                    console.log(`[SUCCESS] [Movie Mirror] Found subtitle for "${title}" -> ${dlLink}`);
+                    return {
+                        id: 'MovieMirror_' + encodeURIComponent(title),
+                        url: dlLink,
+                        lang: 'Malayalam',
+                        name: `[Movie Mirror] Malayalam - ${title}`,
+                        title: "Movie Mirror"
+                    };
+                }
             }
         }
         console.log(`[NOT FOUND] [Movie Mirror] No subtitle found for "${title}"`);
@@ -297,6 +313,7 @@ builder.defineSubtitlesHandler(async function(args) {
     console.log(`\n========================================`);
     console.log(`[REQUEST] Incoming subtitle request: Type=${type}, ID=${id}`);
 
+    const imdbId = id.split(':')[0];
     const cacheKey = `sub_${type}_${id}`;
     const cached = subCache.get(cacheKey);
     if (cached) {
@@ -312,9 +329,9 @@ builder.defineSubtitlesHandler(async function(args) {
     console.log(`[META RESOLVED] Title: "${meta.title}", Year: ${meta.year || 'N/A'}`);
 
     const [msone, goat, mirror] = await Promise.all([
-        searchSite(meta.title, 'https://malayalamsubtitles.org/?s={query}', 'MSone'),
+        searchSite(meta.title, 'https://malayalamsubtitles.org/?s={query}', 'MSone', imdbId),
         searchTeamGoat(meta, type, id),
-        searchMovieMirror(meta.title)
+        searchMovieMirror(meta.title, imdbId)
     ]);
     
     const subtitles = [];
