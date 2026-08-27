@@ -1,0 +1,16 @@
+{
+  "name": "malsub",
+  "version": "1.0.0",
+  "description": "Malayalam Subtitles Stremio Addon",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js"
+  },
+  "dependencies": {
+    "stremio-addon-sdk": "^1.1.8",
+    "express": "^4.19.2",
+    "axios": "^1.6.8",
+    "cheerio": "^1.0.0-rc.12",
+    "adm-zip": "^0.5.12"
+  }
+}
