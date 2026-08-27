@@ -325,21 +325,32 @@ builder.defineSubtitlesHandler(async function(args) {
         searchMovieMirror(meta.title, imdbId)
     ]);
     
+    const seasonMatch = id.match(/:(\d+):(\d+)$/);
+    const season = seasonMatch ? parseInt(seasonMatch[1]) : null;
+    const episode = seasonMatch ? parseInt(seasonMatch[2]) : null;
+    
+    let epTag = '';
+    if (season !== null && episode !== null) {
+        const sStr = String(season).padStart(2, '0');
+        const eStr = String(episode).padStart(2, '0');
+        epTag = ` S${sStr}E${eStr}`;
+    }
+
     const subtitles = [];
     for (let sub of [msone, goat, mirror]) {
         if (sub) {
             const subCopy = { ...sub };
-            if (subCopy.url.endsWith('.zip') || !subCopy.url.endsWith('.srt')) {
-                const fakeFilename = encodeURIComponent((subCopy.title || 'Subtitle') + '.srt');
-                let extractParams = `url=${encodeURIComponent(subCopy.url)}`;
-                
-                const seasonMatch = id.match(/:(\d+):(\d+)$/);
-                if (seasonMatch) {
-                    extractParams += `&season=${seasonMatch[1]}&episode=${seasonMatch[2]}`;
-                }
-                
-                subCopy.url = `${globalBaseUrl}/extract/${fakeFilename}?${extractParams}`;
+            const providerTag = subCopy.title || 'MalSUB'; // e.g. "MSone", "Team GOAT", "Movie Mirror"
+            const cleanTitle = meta.title.replace(/[\\/:*?"<>|]/g, '');
+            const filename = `[${providerTag}] ${cleanTitle}${epTag}.srt`;
+            const fakeFilename = encodeURIComponent(filename);
+            
+            let extractParams = `url=${encodeURIComponent(subCopy.url)}`;
+            if (season !== null && episode !== null) {
+                extractParams += `&season=${season}&episode=${episode}`;
             }
+            
+            subCopy.url = `${globalBaseUrl}/extract/${fakeFilename}?${extractParams}`;
             subtitles.push(subCopy);
         }
     }
