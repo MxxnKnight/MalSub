@@ -192,14 +192,24 @@ async function searchTeamGoat(meta, type, id) {
     }
     const slug = toSlug(meta.title);
     
-    // Strategy 1: Direct Slug with Year
-    let url = type === 'series' && season ? 
-        `https://malayalamsubtitles.in/release/${slug}-season${season}-${meta.year}/` :
-        `https://malayalamsubtitles.in/release/${slug}-${meta.year}/`;
+    // Always candidate slugs: slug-season-year, slug-year, slug-season, slug
+    let urls = [];
+    if (type === 'series' && season && meta.year) {
+        urls.push(`https://malayalamsubtitles.in/release/${slug}-season${season}-${meta.year}/`);
+    }
+    if (meta.year) {
+        urls.push(`https://malayalamsubtitles.in/release/${slug}-${meta.year}/`);
+    }
+    if (type === 'series' && season) {
+        urls.push(`https://malayalamsubtitles.in/release/${slug}-season${season}/`);
+    }
+    urls.push(`https://malayalamsubtitles.in/release/${slug}/`);
     
-    try {
-        console.log(`[TeamGOAT] Checking direct URL (Strategy 1): ${url}`);
-        const dlLink = await findDownloadLink(url, imdbId);
+    urls = [...new Set(urls)];
+    
+    for (let u of urls) {
+        console.log(`[TeamGOAT] Checking direct URL candidate: ${u}`);
+        const dlLink = await findDownloadLink(u, imdbId);
         if (dlLink) {
             console.log(`[SUCCESS] [TeamGOAT] Found subtitle for "${meta.title}" -> ${dlLink}`);
             return {
@@ -210,26 +220,7 @@ async function searchTeamGoat(meta, type, id) {
                 title: "Team GOAT"
             };
         }
-    } catch (e) {}
-    
-    // Strategy 2: Direct Slug without Year
-    try {
-        let fallbackUrl = type === 'series' && season ? 
-            `https://malayalamsubtitles.in/release/${slug}-season${season}/` :
-            `https://malayalamsubtitles.in/release/${slug}/`;
-        console.log(`[TeamGOAT] Checking direct URL (Strategy 2): ${fallbackUrl}`);
-        const dlLink = await findDownloadLink(fallbackUrl, imdbId);
-        if (dlLink) {
-            console.log(`[SUCCESS] [TeamGOAT] Found subtitle for "${meta.title}" -> ${dlLink}`);
-            return {
-                id: 'TeamGOAT_' + encodeURIComponent(meta.title),
-                url: dlLink,
-                lang: 'Malayalam',
-                name: `[TeamGOAT] Malayalam - ${meta.title}`,
-                title: "Team GOAT"
-            };
-        }
-    } catch (e) {}
+    }
 
     // Strategy 3: Site Search Fallback if direct slugs fail
     try {
