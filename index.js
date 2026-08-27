@@ -120,20 +120,22 @@ async function findDownloadLink(postUrl) {
     return null;
 }
 
-async function searchSite(title, urlTemplate, siteName, season = null) {
+async function searchSite(title, urlTemplate, siteName) {
     const results = [];
     try {
-        let query = title;
-        if (season) query += ` Season ${season}`;
-        const searchUrl = urlTemplate.replace('{query}', encodeURIComponent(query));
+        const searchUrl = urlTemplate.replace('{query}', encodeURIComponent(title));
+        console.log(`[${siteName}] Searching: ${searchUrl}`);
         const { data } = await httpClient.get(searchUrl);
         const $ = cheerio.load(data);
+        
+        const cleanTitle = title.toLowerCase().replace(/[^a-z0-9]/g, '');
         
         $('a').each((i, el) => {
             const text = $(el).text().toLowerCase();
             const href = $(el).attr('href');
-            if (href && text.includes(title.toLowerCase()) && !href.includes('?s=')) {
-                results.push({ url: href, name: text.trim() });
+            const cleanText = text.replace(/[^a-z0-9]/g, '');
+            if (href && (text.includes(title.toLowerCase()) || cleanText.includes(cleanTitle)) && !href.includes('?s=')) {
+                results.push({ url: href, name: $(el).text().trim() });
             }
         });
         
@@ -150,17 +152,19 @@ async function searchSite(title, urlTemplate, siteName, season = null) {
         if (topResult) {
             const dlLink = await findDownloadLink(topResult.url);
             if (dlLink) {
+                console.log(`[SUCCESS] [${siteName}] Found subtitle for "${title}" -> ${dlLink}`);
                 return {
                     id: siteName + '_' + encodeURIComponent(title),
                     url: dlLink,
                     lang: 'Malayalam',
-                    name: `[MSone] Malayalam - ${topResult.name}`,
+                    name: `[${siteName}] Malayalam - ${topResult.name}`,
                     title: siteName
                 };
             }
         }
+        console.log(`[NOT FOUND] [${siteName}] No subtitle found for "${title}"`);
     } catch (e) {
-        console.error(`${siteName} error:`, e.message);
+        console.error(`[ERROR] [${siteName}] ${e.message}`);
     }
     return null;
 }
@@ -180,8 +184,10 @@ async function searchTeamGoat(meta, type, id) {
         `https://malayalamsubtitles.in/release/${slug}-${meta.year}/`;
     
     try {
+        console.log(`[TeamGOAT] Checking direct URL (Strategy 1): ${url}`);
         const dlLink = await findDownloadLink(url);
         if (dlLink) {
+            console.log(`[SUCCESS] [TeamGOAT] Found subtitle for "${meta.title}" -> ${dlLink}`);
             return {
                 id: 'TeamGOAT_' + encodeURIComponent(meta.title),
                 url: dlLink,
@@ -197,8 +203,10 @@ async function searchTeamGoat(meta, type, id) {
         let fallbackUrl = type === 'series' && season ? 
             `https://malayalamsubtitles.in/release/${slug}-season${season}/` :
             `https://malayalamsubtitles.in/release/${slug}/`;
+        console.log(`[TeamGOAT] Checking direct URL (Strategy 2): ${fallbackUrl}`);
         const dlLink = await findDownloadLink(fallbackUrl);
         if (dlLink) {
+            console.log(`[SUCCESS] [TeamGOAT] Found subtitle for "${meta.title}" -> ${dlLink}`);
             return {
                 id: 'TeamGOAT_' + encodeURIComponent(meta.title),
                 url: dlLink,
@@ -212,16 +220,19 @@ async function searchTeamGoat(meta, type, id) {
     // Strategy 3: Site Search Fallback if direct slugs fail
     try {
         const searchUrl = `https://malayalamsubtitles.in/?s=${encodeURIComponent(meta.title)}`;
+        console.log(`[TeamGOAT] Searching (Strategy 3): ${searchUrl}`);
         const { data } = await httpClient.get(searchUrl);
         const $ = cheerio.load(data);
         
         let matchUrl = null;
         let matchName = meta.title;
+        const cleanTitle = meta.title.toLowerCase().replace(/[^a-z0-9]/g, '');
         
         $('a').each((i, el) => {
             const href = $(el).attr('href');
             const text = $(el).text().toLowerCase();
-            if (href && href.includes('/release/') && text.includes(meta.title.toLowerCase())) {
+            const cleanText = text.replace(/[^a-z0-9]/g, '');
+            if (href && href.includes('/release/') && (text.includes(meta.title.toLowerCase()) || cleanText.includes(cleanTitle))) {
                 matchUrl = href;
                 if ($(el).text().trim()) matchName = $(el).text().trim();
             }
@@ -233,6 +244,7 @@ async function searchTeamGoat(meta, type, id) {
             }
             const dlLink = await findDownloadLink(matchUrl);
             if (dlLink) {
+                console.log(`[SUCCESS] [TeamGOAT] Found subtitle for "${meta.title}" -> ${dlLink}`);
                 return {
                     id: 'TeamGOAT_' + encodeURIComponent(meta.title),
                     url: dlLink,
@@ -242,24 +254,26 @@ async function searchTeamGoat(meta, type, id) {
                 };
             }
         }
+        console.log(`[NOT FOUND] [TeamGOAT] No subtitle found for "${meta.title}"`);
     } catch (e) {
-        console.error("TeamGOAT search fallback error:", e.message);
+        console.error(`[ERROR] [TeamGOAT] ${e.message}`);
     }
 
     return null;
 }
 
-async function searchMovieMirror(title, season = null) {
+async function searchMovieMirror(title) {
     try {
-        let query = title;
-        if (season) query += ` Season ${season}`;
-        const searchUrl = `https://moviemirrorsubtitles.com/wp-json/wp/v2/posts?search=${encodeURIComponent(query)}`;
+        const cleanQuery = title.replace(/\./g, '');
+        const searchUrl = `https://moviemirrorsubtitles.com/wp-json/wp/v2/posts?search=${encodeURIComponent(cleanQuery)}`;
+        console.log(`[Movie Mirror] Searching: ${searchUrl}`);
         const { data } = await httpClient.get(searchUrl);
         
         if (data && data.length > 0) {
             const postUrl = data[0].link;
             const dlLink = await findDownloadLink(postUrl);
             if (dlLink) {
+                console.log(`[SUCCESS] [Movie Mirror] Found subtitle for "${title}" -> ${dlLink}`);
                 return {
                     id: 'MovieMirror_' + encodeURIComponent(title),
                     url: dlLink,
@@ -269,8 +283,9 @@ async function searchMovieMirror(title, season = null) {
                 };
             }
         }
+        console.log(`[NOT FOUND] [Movie Mirror] No subtitle found for "${title}"`);
     } catch (e) {
-        console.error("MovieMirror error:", e.message);
+        console.error(`[ERROR] [Movie Mirror] ${e.message}`);
     }
     return null;
 }
@@ -279,26 +294,32 @@ let globalBaseUrl = 'http://localhost:7000'; // Default, overridden in Express
 
 builder.defineSubtitlesHandler(async function(args) {
     const { type, id } = args;
+    console.log(`\n========================================`);
+    console.log(`[REQUEST] Incoming subtitle request: Type=${type}, ID=${id}`);
+
     const cacheKey = `sub_${type}_${id}`;
     const cached = subCache.get(cacheKey);
-    if (cached) return Promise.resolve({ subtitles: cached });
+    if (cached) {
+        console.log(`[CACHE HIT] Returning ${cached.length} cached subtitles for ${id}`);
+        return Promise.resolve({ subtitles: cached });
+    }
 
     const meta = await getMeta(id, type);
-    if (!meta || !meta.title) return { subtitles: [] };
+    if (!meta || !meta.title) {
+        console.log(`[META ERROR] Could not resolve IMDb ID "${id}" via Cinemeta.`);
+        return { subtitles: [] };
+    }
+    console.log(`[META RESOLVED] Title: "${meta.title}", Year: ${meta.year || 'N/A'}`);
 
-    const seasonMatch = id.match(/:(\d+):(\d+)$/);
-    const season = seasonMatch ? seasonMatch[1] : null;
-    
     const [msone, goat, mirror] = await Promise.all([
-        searchSite(meta.title, 'https://malayalamsubtitles.org/?s={query}', 'MSone', season),
+        searchSite(meta.title, 'https://malayalamsubtitles.org/?s={query}', 'MSone'),
         searchTeamGoat(meta, type, id),
-        searchMovieMirror(meta.title, season)
+        searchMovieMirror(meta.title)
     ]);
     
     const subtitles = [];
     for (let sub of [msone, goat, mirror]) {
         if (sub) {
-            // Copy sub object so original URL is preserved
             const subCopy = { ...sub };
             if (subCopy.url.endsWith('.zip') || !subCopy.url.endsWith('.srt')) {
                 const fakeFilename = encodeURIComponent((subCopy.title || 'Subtitle') + '.srt');
@@ -315,6 +336,7 @@ builder.defineSubtitlesHandler(async function(args) {
         }
     }
     
+    console.log(`[RESPONSE] Returning ${subtitles.length} Malayalam subtitle(s) for "${meta.title}"`);
     subCache.set(cacheKey, subtitles);
     return Promise.resolve({ subtitles: subtitles });
 });
