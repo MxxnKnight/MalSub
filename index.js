@@ -134,23 +134,30 @@ async function findDownloadLink(postUrl, targetImdbId = null) {
     return null;
 }
 
+function normalizeText(text) {
+    return text ? text.normalize("NFD").replace(/[\u0300-\u036f]/g, "") : "";
+}
+
 async function searchSite(title, urlTemplate, siteName, imdbId = null) {
     const results = [];
     try {
-        const cleanSearchQuery = title.replace(/:/g, ' ').replace(/\s+/g, ' ').trim();
+        const cleanTitleBase = normalizeText(title);
+        const cleanSearchQuery = cleanTitleBase.replace(/:/g, ' ').replace(/\s+/g, ' ').trim();
         const searchUrl = urlTemplate.replace('{query}', encodeURIComponent(cleanSearchQuery));
         console.log(`[${siteName}] Searching: ${searchUrl}`);
         const { data } = await httpClient.get(searchUrl);
         const $ = cheerio.load(data);
         
-        const cleanTitle = title.toLowerCase().replace(/[^a-z0-9]/g, '');
+        const normTitle = cleanTitleBase.toLowerCase();
+        const cleanTitle = normTitle.replace(/[^a-z0-9]/g, '');
         
         $('a').each((i, el) => {
-            const text = $(el).text().toLowerCase();
+            const rawText = $(el).text();
+            const normText = normalizeText(rawText).toLowerCase();
             const href = $(el).attr('href');
-            const cleanText = text.replace(/[^a-z0-9]/g, '');
-            if (href && (text.includes(title.toLowerCase()) || cleanText.includes(cleanTitle)) && !href.includes('?s=')) {
-                results.push({ url: href, name: $(el).text().trim() });
+            const cleanText = normText.replace(/[^a-z0-9]/g, '');
+            if (href && (normText.includes(normTitle) || cleanText.includes(cleanTitle)) && !href.includes('?s=')) {
+                results.push({ url: href, name: rawText.trim() });
             }
         });
         
@@ -189,7 +196,8 @@ async function searchTeamGoat(meta, type, id) {
     const season = seasonMatch ? seasonMatch[1] : null;
     
     function toSlug(text) {
-        return text.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/(^-|-$)/g, '');
+        const norm = normalizeText(text);
+        return norm.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/(^-|-$)/g, '');
     }
     const slug = toSlug(meta.title);
     
@@ -225,7 +233,8 @@ async function searchTeamGoat(meta, type, id) {
 
     // Strategy 3: Site Search Fallback if direct slugs fail
     try {
-        const cleanSearchQuery = meta.title.replace(/:/g, ' ').replace(/\s+/g, ' ').trim();
+        const cleanTitleBase = normalizeText(meta.title);
+        const cleanSearchQuery = cleanTitleBase.replace(/:/g, ' ').replace(/\s+/g, ' ').trim();
         const searchUrl = `https://malayalamsubtitles.in/?s=${encodeURIComponent(cleanSearchQuery)}`;
         console.log(`[TeamGOAT] Searching (Strategy 3): ${searchUrl}`);
         const { data } = await httpClient.get(searchUrl);
@@ -233,15 +242,17 @@ async function searchTeamGoat(meta, type, id) {
         
         let matchUrl = null;
         let matchName = meta.title;
-        const cleanTitle = meta.title.toLowerCase().replace(/[^a-z0-9]/g, '');
+        const normTitle = cleanTitleBase.toLowerCase();
+        const cleanTitle = normTitle.replace(/[^a-z0-9]/g, '');
         
         $('a').each((i, el) => {
             const href = $(el).attr('href');
-            const text = $(el).text().toLowerCase();
-            const cleanText = text.replace(/[^a-z0-9]/g, '');
-            if (href && href.includes('/release/') && (text.includes(meta.title.toLowerCase()) || cleanText.includes(cleanTitle))) {
+            const rawText = $(el).text();
+            const normText = normalizeText(rawText).toLowerCase();
+            const cleanText = normText.replace(/[^a-z0-9]/g, '');
+            if (href && href.includes('/release/') && (normText.includes(normTitle) || cleanText.includes(cleanTitle))) {
                 matchUrl = href;
-                if ($(el).text().trim()) matchName = $(el).text().trim();
+                if (rawText.trim()) matchName = rawText.trim();
             }
         });
         
@@ -271,7 +282,8 @@ async function searchTeamGoat(meta, type, id) {
 
 async function searchMovieMirror(title, imdbId = null) {
     try {
-        const cleanQuery = title.replace(/:/g, ' ').replace(/\./g, '').replace(/\s+/g, ' ').trim();
+        const cleanTitleBase = normalizeText(title);
+        const cleanQuery = cleanTitleBase.replace(/:/g, ' ').replace(/\./g, '').replace(/\s+/g, ' ').trim();
         const searchUrl = `https://moviemirrorsubtitles.com/wp-json/wp/v2/posts?search=${encodeURIComponent(cleanQuery)}`;
         console.log(`[Movie Mirror] Searching: ${searchUrl}`);
         const { data } = await httpClient.get(searchUrl);
