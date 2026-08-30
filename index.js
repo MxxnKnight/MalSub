@@ -137,7 +137,8 @@ async function findDownloadLink(postUrl, targetImdbId = null) {
 async function searchSite(title, urlTemplate, siteName, imdbId = null) {
     const results = [];
     try {
-        const searchUrl = urlTemplate.replace('{query}', encodeURIComponent(title));
+        const cleanSearchQuery = title.replace(/:/g, ' ').replace(/\s+/g, ' ').trim();
+        const searchUrl = urlTemplate.replace('{query}', encodeURIComponent(cleanSearchQuery));
         console.log(`[${siteName}] Searching: ${searchUrl}`);
         const { data } = await httpClient.get(searchUrl);
         const $ = cheerio.load(data);
@@ -224,7 +225,8 @@ async function searchTeamGoat(meta, type, id) {
 
     // Strategy 3: Site Search Fallback if direct slugs fail
     try {
-        const searchUrl = `https://malayalamsubtitles.in/?s=${encodeURIComponent(meta.title)}`;
+        const cleanSearchQuery = meta.title.replace(/:/g, ' ').replace(/\s+/g, ' ').trim();
+        const searchUrl = `https://malayalamsubtitles.in/?s=${encodeURIComponent(cleanSearchQuery)}`;
         console.log(`[TeamGOAT] Searching (Strategy 3): ${searchUrl}`);
         const { data } = await httpClient.get(searchUrl);
         const $ = cheerio.load(data);
@@ -269,7 +271,7 @@ async function searchTeamGoat(meta, type, id) {
 
 async function searchMovieMirror(title, imdbId = null) {
     try {
-        const cleanQuery = title.replace(/\./g, '');
+        const cleanQuery = title.replace(/:/g, ' ').replace(/\./g, '').replace(/\s+/g, ' ').trim();
         const searchUrl = `https://moviemirrorsubtitles.com/wp-json/wp/v2/posts?search=${encodeURIComponent(cleanQuery)}`;
         console.log(`[Movie Mirror] Searching: ${searchUrl}`);
         const { data } = await httpClient.get(searchUrl);
