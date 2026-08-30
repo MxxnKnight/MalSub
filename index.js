@@ -473,7 +473,7 @@ app.get('/api/status', async (req, res) => {
     const checkSite = async (url) => {
         try {
             const start = Date.now();
-            await httpClient.get(url, { timeout: 8000 });
+            await httpClient.get(url, { timeout: 12000 });
             const duration = Date.now() - start;
             return { status: 'operational', responseTime: `${duration}ms` };
         } catch(e) {
@@ -500,50 +500,54 @@ app.get('/api/status', async (req, res) => {
     res.json(statusCache);
 });
 
-// Search API Endpoint for Web UI
+// Search API Endpoint for Web UI (Multi-result resolution for movies + series)
 app.get('/api/search', async (req, res) => {
     const query = req.query.q;
     if (!query) return res.status(400).json({ error: 'Query parameter q is required' });
 
     try {
-        let meta = null;
-        // Search Cinemeta for movie first, then series
-        try {
-            const movieRes = await httpClient.get(`https://v3-cinemeta.strem.io/catalog/movie/top/search=${encodeURIComponent(query)}.json`);
-            if (movieRes.data && movieRes.data.metas && movieRes.data.metas.length > 0) {
-                const item = movieRes.data.metas[0];
-                meta = { title: item.name, year: item.year, type: 'movie', imdbId: item.id, poster: item.poster };
-            }
-        } catch(e) {}
-
-        if (!meta) {
-            try {
-                const seriesRes = await httpClient.get(`https://v3-cinemeta.strem.io/catalog/series/top/search=${encodeURIComponent(query)}.json`);
-                if (seriesRes.data && seriesRes.data.metas && seriesRes.data.metas.length > 0) {
-                    const item = seriesRes.data.metas[0];
-                    meta = { title: item.name, year: item.year, type: 'series', imdbId: item.id, poster: item.poster };
-                }
-            } catch(e) {}
-        }
-
-        if (!meta) {
-            meta = { title: query, year: null, type: 'movie', imdbId: null, poster: null };
-        }
-
-        const [msone, goat, mirror] = await Promise.all([
-            searchSite(meta.title, 'https://malayalamsubtitles.org/?s={query}', 'MSone', meta.imdbId),
-            searchTeamGoat(meta, meta.type, meta.imdbId || 'tt0000000'),
-            searchMovieMirror(meta.title, meta.imdbId)
+        let metas = [];
+        
+        // Search Cinemeta for both movies and series concurrently
+        const [movieRes, seriesRes] = await Promise.allSettled([
+            httpClient.get(`https://v3-cinemeta.strem.io/catalog/movie/top/search=${encodeURIComponent(query)}.json`),
+            httpClient.get(`https://v3-cinemeta.strem.io/catalog/series/top/search=${encodeURIComponent(query)}.json`)
         ]);
 
-        res.json({
-            meta,
-            results: {
-                msone: msone ? { name: msone.name, url: msone.url } : null,
-                goat: goat ? { name: goat.name, url: goat.url } : null,
-                mirror: mirror ? { name: mirror.name, url: mirror.url } : null
-            }
+        if (seriesRes.status === 'fulfilled' && seriesRes.value.data && seriesRes.value.data.metas) {
+            metas.push(...seriesRes.value.data.metas.slice(0, 2).map(m => ({ title: m.name, year: m.year, type: 'series', imdbId: m.id, poster: m.poster })));
+        }
+
+        if (movieRes.status === 'fulfilled' && movieRes.value.data && movieRes.value.data.metas) {
+            metas.push(...movieRes.value.data.metas.slice(0, 2).map(m => ({ title: m.name, year: m.year, type: 'movie', imdbId: m.id, poster: m.poster })));
+        }
+
+        if (metas.length === 0) {
+            metas.push({ title: query, year: null, type: 'movie', imdbId: null, poster: null });
+        }
+
+        // Limit to top 2 metadata matches
+        const topMetas = metas.slice(0, 2);
+        
+        const searchPromises = topMetas.map(async (meta) => {
+            const [msone, goat, mirror] = await Promise.all([
+                searchSite(meta.title, 'https://malayalamsubtitles.org/?s={query}', 'MSone', meta.imdbId),
+                searchTeamGoat(meta, meta.type, meta.imdbId || 'tt0000000'),
+                searchMovieMirror(meta.title, meta.imdbId)
+            ]);
+
+            return {
+                meta,
+                results: {
+                    msone: msone ? { name: msone.name, url: msone.url } : null,
+                    goat: goat ? { name: goat.name, url: goat.url } : null,
+                    mirror: mirror ? { name: mirror.name, url: mirror.url } : null
+                }
+            };
         });
+
+        const items = await Promise.all(searchPromises);
+        res.json({ items });
     } catch(e) {
         res.status(500).json({ error: e.message });
     }
@@ -866,26 +870,30 @@ app.get('/', (req, res) => {
                 const res = await fetch('/api/search?q=' + encodeURIComponent(input));
                 const data = await res.json();
                 
-                if (data.meta) {
-                    const m = data.meta;
-                    const r = data.results;
+                if (data.items && data.items.length > 0) {
+                    let html = '';
+                    for (let item of data.items) {
+                        const m = item.meta;
+                        const r = item.results;
 
-                    const msonePill = r.msone ? \`<a href="\${r.msone.url}" class="sub-pill pill-found" target="_blank">✓ MSone</a>\` : \`<span class="sub-pill pill-missing">✗ MSone</span>\`;
-                    const goatPill = r.goat ? \`<a href="\${r.goat.url}" class="sub-pill pill-found" target="_blank">✓ TeamGOAT</a>\` : \`<span class="sub-pill pill-missing">✗ TeamGOAT</span>\`;
-                    const mirrorPill = r.mirror ? \`<a href="\${r.mirror.url}" class="sub-pill pill-found" target="_blank">✓ Movie Mirror</a>\` : \`<span class="sub-pill pill-missing">✗ Movie Mirror</span>\`;
+                        const msonePill = r.msone ? \`<a href="\${r.msone.url}" class="sub-pill pill-found" target="_blank">✓ MSone</a>\` : \`<span class="sub-pill pill-missing">✗ MSone</span>\`;
+                        const goatPill = r.goat ? \`<a href="\${r.goat.url}" class="sub-pill pill-found" target="_blank">✓ TeamGOAT</a>\` : \`<span class="sub-pill pill-missing">✗ TeamGOAT</span>\`;
+                        const mirrorPill = r.mirror ? \`<a href="\${r.mirror.url}" class="sub-pill pill-found" target="_blank">✓ Movie Mirror</a>\` : \`<span class="sub-pill pill-missing">✗ Movie Mirror</span>\`;
 
-                    const posterImg = m.poster ? \`<img src="\${m.poster}" class="poster" alt="poster">\` : \`<div class="poster"></div>\`;
+                        const posterImg = m.poster ? \`<img src="\${m.poster}" class="poster" alt="poster">\` : \`<div class="poster"></div>\`;
 
-                    resultsContainer.innerHTML = \`
-                        <div class="result-card">
-                            \${posterImg}
-                            <div class="result-info">
-                                <div class="result-title">\${m.title} \${m.year ? '('+m.year+')' : ''}</div>
-                                <div class="result-meta">\${m.type.toUpperCase()} • \${m.imdbId || 'N/A'}</div>
-                                <div class="sub-pills">\${msonePill} \${goatPill} \${mirrorPill}</div>
+                        html += \`
+                            <div class="result-card">
+                                \${posterImg}
+                                <div class="result-info">
+                                    <div class="result-title">\${m.title} \${m.year ? '('+m.year+')' : ''}</div>
+                                    <div class="result-meta">\${m.type.toUpperCase()} • \${m.imdbId || 'N/A'}</div>
+                                    <div class="sub-pills">\${msonePill} \${goatPill} \${mirrorPill}</div>
+                                </div>
                             </div>
-                        </div>
-                    \`;
+                        \`;
+                    }
+                    resultsContainer.innerHTML = html;
                 } else {
                     resultsContainer.innerHTML = '<div style="color:#f87171;">No titles found for this query.</div>';
                 }
