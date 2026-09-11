@@ -7,11 +7,12 @@
     "start": "node index.js"
   },
   "dependencies": {
-    "stremio-addon-sdk": "^1.1.8",
-    "express": "^4.19.2",
+    "adm-zip": "^0.5.12",
     "axios": "^1.6.8",
     "cheerio": "^1.0.0-rc.12",
-    "adm-zip": "^0.5.12"
+    "express": "^4.19.2",
+    "mongodb": "^7.6.0",
+    "stremio-addon-sdk": "^1.1.8"
   },
   "engines": {
     "node": ">=18.0.0"

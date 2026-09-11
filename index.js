@@ -3,6 +3,7 @@ const express = require('express');
 const axios = require('axios');
 const cheerio = require('cheerio');
 const AdmZip = require('adm-zip');
+const { MongoClient } = require('mongodb');
 
 // Custom Axios client with realistic User-Agent & 15s timeout
 const httpClient = axios.create({
@@ -41,6 +42,214 @@ class SimpleCache {
 
 const metaCache = new SimpleCache(200, 24 * 60 * 60 * 1000);
 const subCache = new SimpleCache(300, 24 * 60 * 60 * 1000);
+
+// =========================================================
+// MONGODB INDEX — Persistent slug→URL index per provider
+// DB: MALsub  |  Collection: index
+// Each document: { _id: "<provider>:<slug>", provider, slug, url, lastmod }
+//
+// In-memory Maps mirror the DB for zero-latency lookups.
+// On startup we warm-load from MongoDB, then refresh from sitemaps.
+// If MongoDB is unreachable, we fall back to in-memory only.
+// =========================================================
+const MONGO_URI = process.env.MONGODB_URI || null;
+const MONGO_DB   = 'MALsub';
+const MONGO_COLL = 'index';
+
+let mongoClient = null;
+let mongoCollection = null;
+
+async function connectMongo() {
+    if (!MONGO_URI) {
+        console.warn('[MongoDB] MONGODB_URI not set — running without persistent index');
+        return false;
+    }
+    try {
+        mongoClient = new MongoClient(MONGO_URI, { serverSelectionTimeoutMS: 8000 });
+        await mongoClient.connect();
+        const db = mongoClient.db(MONGO_DB);
+        mongoCollection = db.collection(MONGO_COLL);
+        // Ensure index on provider field for fast per-provider queries
+        await mongoCollection.createIndex({ provider: 1 });
+        console.log(`[MongoDB] Connected to ${MONGO_DB}.${MONGO_COLL}`);
+        return true;
+    } catch (e) {
+        console.error('[MongoDB] Connection failed:', e.message);
+        mongoClient = null;
+        mongoCollection = null;
+        return false;
+    }
+}
+
+// Warm-load all docs from MongoDB into in-memory Maps
+async function warmLoadFromMongo() {
+    if (!mongoCollection) return 0;
+    try {
+        const cursor = mongoCollection.find({}, { projection: { _id: 0, provider: 1, slug: 1, url: 1 } });
+        let count = 0;
+        await cursor.forEach(doc => {
+            const map = sitemapIndex[doc.provider];
+            if (map && !map.has(doc.slug)) {
+                map.set(doc.slug, doc.url);
+                count++;
+            }
+        });
+        console.log(`[MongoDB] Warm-loaded ${count} slugs into in-memory index`);
+        return count;
+    } catch (e) {
+        console.error('[MongoDB] Warm-load failed:', e.message);
+        return 0;
+    }
+}
+
+// Upsert a batch of { provider, slug, url } docs into MongoDB
+async function upsertToMongo(docs) {
+    if (!mongoCollection || docs.length === 0) return;
+    try {
+        const ops = docs.map(d => ({
+            updateOne: {
+                filter: { _id: `${d.provider}:${d.slug}` },
+                update: { $set: { provider: d.provider, slug: d.slug, url: d.url, lastmod: new Date() } },
+                upsert: true
+            }
+        }));
+        const result = await mongoCollection.bulkWrite(ops, { ordered: false });
+        console.log(`[MongoDB] Upserted ${result.upsertedCount} new + ${result.modifiedCount} updated slugs`);
+    } catch (e) {
+        console.error('[MongoDB] Upsert failed:', e.message);
+    }
+}
+
+async function getMongoStats() {
+    if (!mongoCollection) return null;
+    try {
+        const total = await mongoCollection.countDocuments();
+        const byProvider = await mongoCollection.aggregate([
+            { $group: { _id: '$provider', count: { $sum: 1 } } }
+        ]).toArray();
+        const providerMap = {};
+        byProvider.forEach(p => { providerMap[p._id] = p.count; });
+        return { total, byProvider: providerMap };
+    } catch (e) {
+        return null;
+    }
+}
+
+// =========================================================
+// SITEMAP INDEX — In-memory slug→URL Maps for all 3 providers
+// Warm-loaded from MongoDB on startup, refreshed every 6 hours
+// =========================================================
+const sitemapIndex = {
+    msone: new Map(),   // slug → postUrl
+    mirror: new Map(),  // slug → postUrl
+    goat: new Map(),    // slug → postUrl
+    lastRefreshed: null
+};
+
+function urlToSlug(url) {
+    return url.replace(/\/$/, '').split('/').pop().toLowerCase();
+}
+
+async function buildMsoneIndex() {
+    const newDocs = [];
+    try {
+        const { data: idxXml } = await httpClient.get('https://malayalamsubtitles.org/sitemap.xml', { timeout: 20000 });
+        const postSitemaps = [...idxXml.matchAll(/<loc>([^<]+)<\/loc>/g)]
+            .map(m => m[1].trim()).filter(u => u.includes('post-sitemap'));
+
+        for (const sitemapUrl of postSitemaps) {
+            try {
+                const { data } = await httpClient.get(sitemapUrl, { timeout: 20000 });
+                const urls = [...data.matchAll(/<loc>([^<]+)<\/loc>/g)].map(m => m[1].trim());
+                for (const url of urls) {
+                    const slug = urlToSlug(url);
+                    if (slug && !sitemapIndex.msone.has(slug)) {
+                        sitemapIndex.msone.set(slug, url);
+                        newDocs.push({ provider: 'msone', slug, url });
+                    }
+                }
+                console.log(`[INDEX] MSone ${sitemapUrl.split('/').pop()}: total now ${sitemapIndex.msone.size}`);
+            } catch (e) {
+                console.error(`[INDEX] MSone ${sitemapUrl.split('/').pop()} failed:`, e.message);
+            }
+        }
+        console.log(`[INDEX] MSone: ${newDocs.length} new slugs found (total ${sitemapIndex.msone.size})`);
+    } catch(e) {
+        console.error('[INDEX] MSone sitemap fetch failed:', e.message);
+    }
+    await upsertToMongo(newDocs);
+}
+
+async function buildMirrorIndex() {
+    const newDocs = [];
+    try {
+        const { data } = await httpClient.get('https://moviemirrorsubtitles.com/post-sitemap.xml', { timeout: 20000 });
+        const urls = [...data.matchAll(/<loc>(?:<!\[CDATA\[)?([^\]<]+)(?:\]\]>)?<\/loc>/g)].map(m => m[1].trim());
+        for (const url of urls) {
+            const slug = urlToSlug(url);
+            if (slug && !sitemapIndex.mirror.has(slug)) {
+                sitemapIndex.mirror.set(slug, url);
+                newDocs.push({ provider: 'mirror', slug, url });
+            }
+        }
+        console.log(`[INDEX] Movie Mirror: ${newDocs.length} new slugs (total ${sitemapIndex.mirror.size})`);
+    } catch(e) {
+        console.error('[INDEX] Movie Mirror sitemap fetch failed:', e.message);
+    }
+    await upsertToMongo(newDocs);
+}
+
+async function buildGoatIndex() {
+    const newDocs = [];
+    try {
+        const { data } = await httpClient.get('https://malayalamsubtitles.in/subtitles/', { timeout: 20000 });
+        const $ = cheerio.load(data);
+        $('a[href*="/release/"]').each((i, el) => {
+            const href = $(el).attr('href');
+            if (!href) return;
+            const fullUrl = href.startsWith('http') ? href : `https://malayalamsubtitles.in${href.startsWith('/') ? '' : '/'}${href}`;
+            const slug = urlToSlug(fullUrl);
+            if (slug && !sitemapIndex.goat.has(slug)) {
+                sitemapIndex.goat.set(slug, fullUrl);
+                newDocs.push({ provider: 'goat', slug, url: fullUrl });
+            }
+        });
+        console.log(`[INDEX] TeamGOAT: ${newDocs.length} new slugs (total ${sitemapIndex.goat.size})`);
+    } catch(e) {
+        console.error('[INDEX] TeamGOAT /subtitles/ fetch failed:', e.message);
+    }
+    await upsertToMongo(newDocs);
+}
+
+async function refreshSitemapIndex() {
+    console.log('[INDEX] Refreshing provider sitemap indexes...');
+    await Promise.all([buildMsoneIndex(), buildMirrorIndex(), buildGoatIndex()]);
+    sitemapIndex.lastRefreshed = new Date().toISOString();
+    console.log(`[INDEX] Refresh complete. MSone=${sitemapIndex.msone.size}, Mirror=${sitemapIndex.mirror.size}, GoAT=${sitemapIndex.goat.size}`);
+}
+
+// Lookup helpers: try all slug variants for a title+season+year
+function toSlug(text) {
+    const norm = normalizeText(text);
+    return norm.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/(^-|-$)/g, '');
+}
+
+function indexLookup(indexMap, title, year = null, season = null) {
+    const slug = toSlug(title);
+    const variants = [];
+    if (season && year) variants.push(`${slug}-season${season}-${year}`);
+    if (season)        variants.push(`${slug}-season${season}`);
+    if (year)          variants.push(`${slug}-${year}`);
+    variants.push(slug);
+    for (const v of variants) {
+        if (indexMap.has(v)) return indexMap.get(v);
+    }
+    // Fuzzy fallback: find any key that starts with slug
+    for (const [key, url] of indexMap) {
+        if (key.startsWith(slug + '-') || key === slug) return url;
+    }
+    return null;
+}
 
 const manifest = {
     id: 'org.malsub.addon',
@@ -138,13 +347,46 @@ function normalizeText(text) {
     return text ? text.normalize("NFD").replace(/[\u0300-\u036f]/g, "") : "";
 }
 
-async function searchSite(title, urlTemplate, siteName, imdbId = null) {
+
+async function searchMsone(title, imdbId = null, season = null, year = null) {
+    // Strategy 1: Index-first lookup — direct slug match in sitemap index
+    if (sitemapIndex.msone.size > 0) {
+        const slug = toSlug(title);
+        const variants = [];
+        if (season && year) variants.push(`${slug}-season${season}-${year}`);
+        if (season)        variants.push(`${slug}-season${season}`);
+        if (year)          variants.push(`${slug}-${year}`);
+        variants.push(slug);
+        for (const v of variants) {
+            if (sitemapIndex.msone.has(v)) {
+                const url = sitemapIndex.msone.get(v);
+                console.log(`[MSone] [INDEX HIT] ${v} → ${url}`);
+                const dlLink = await findDownloadLink(url, imdbId);
+                if (dlLink) {
+                    console.log(`[SUCCESS] [MSone] Found subtitle for "${title}" (index) -> ${dlLink}`);
+                    return { id: 'MSone_' + encodeURIComponent(title), url: dlLink, lang: 'Malayalam', name: `[MSone] Malayalam - ${title}`, title: 'MSone' };
+                }
+            }
+        }
+        // Fuzzy: scan all keys for titles starting with slug
+        for (const [key, url] of sitemapIndex.msone) {
+            if (key.startsWith(slug + '-') || key === slug) {
+                const dlLink = await findDownloadLink(url, imdbId);
+                if (dlLink) {
+                    console.log(`[SUCCESS] [MSone] Found subtitle for "${title}" (index fuzzy: ${key}) -> ${dlLink}`);
+                    return { id: 'MSone_' + encodeURIComponent(title), url: dlLink, lang: 'Malayalam', name: `[MSone] Malayalam - ${title}`, title: 'MSone' };
+                }
+            }
+        }
+    }
+
+    // Strategy 2: Live search fallback (index miss or index not yet built)
     const results = [];
     try {
         const cleanTitleBase = normalizeText(title);
         const cleanSearchQuery = cleanTitleBase.replace(/:/g, ' ').replace(/\s+/g, ' ').trim();
-        const searchUrl = urlTemplate.replace('{query}', encodeURIComponent(cleanSearchQuery));
-        console.log(`[${siteName}] Searching: ${searchUrl}`);
+        const searchUrl = `https://malayalamsubtitles.org/?s=${encodeURIComponent(cleanSearchQuery)}`;
+        console.log(`[MSone] Searching (live): ${searchUrl}`);
         const { data } = await httpClient.get(searchUrl);
         const $ = cheerio.load(data);
         
@@ -156,36 +398,30 @@ async function searchSite(title, urlTemplate, siteName, imdbId = null) {
             const normText = normalizeText(rawText).toLowerCase();
             const href = $(el).attr('href');
             const cleanText = normText.replace(/[^a-z0-9]/g, '');
-            if (href && (normText.includes(normTitle) || cleanText.includes(cleanTitle)) && !href.includes('?s=')) {
+            if (href && (normText.includes(normTitle) || cleanText.includes(cleanTitle)) && !href.includes('?s=') && href.startsWith('http')) {
                 results.push({ url: href, name: rawText.trim() });
             }
         });
         
-        const unique = [];
-        const seen = new Set();
-        for (let r of results) {
-            if (!seen.has(r.url) && r.url.startsWith('http')) {
-                seen.add(r.url);
-                unique.push(r);
-            }
+        // Season-aware: if season is known, sort results to prefer matching season post
+        let unique = [...new Map(results.map(r => [r.url, r])).values()];
+        if (season) {
+            const padSeason = String(parseInt(season)).padStart(0, '0');
+            const preferred = unique.filter(r => r.url.includes(`season-${padSeason}`) || r.url.includes(`-season-${padSeason}-`) || r.name.toLowerCase().includes(`season ${padSeason}`));
+            const rest = unique.filter(r => !preferred.includes(r));
+            unique = [...preferred, ...rest];
         }
         
         for (let topResult of unique) {
             const dlLink = await findDownloadLink(topResult.url, imdbId);
             if (dlLink) {
-                console.log(`[SUCCESS] [${siteName}] Found subtitle for "${title}" -> ${dlLink}`);
-                return {
-                    id: siteName + '_' + encodeURIComponent(title),
-                    url: dlLink,
-                    lang: 'Malayalam',
-                    name: `[${siteName}] Malayalam - ${topResult.name}`,
-                    title: siteName
-                };
+                console.log(`[SUCCESS] [MSone] Found subtitle for "${title}" -> ${dlLink}`);
+                return { id: 'MSone_' + encodeURIComponent(title), url: dlLink, lang: 'Malayalam', name: `[MSone] Malayalam - ${topResult.name}`, title: 'MSone' };
             }
         }
-        console.log(`[NOT FOUND] [${siteName}] No subtitle found for "${title}"`);
+        console.log(`[NOT FOUND] [MSone] No subtitle found for "${title}"`);
     } catch (e) {
-        console.error(`[ERROR] [${siteName}] ${e.message}`);
+        console.error(`[ERROR] [MSone] ${e.message}`);
     }
     return null;
 }
@@ -194,57 +430,57 @@ async function searchTeamGoat(meta, type, id) {
     const imdbId = id.split(':')[0];
     const seasonMatch = id.match(/:(\d+):\d+$/);
     const season = seasonMatch ? seasonMatch[1] : null;
-    
-    function toSlug(text) {
-        const norm = normalizeText(text);
-        return norm.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/(^-|-$)/g, '');
-    }
     const slug = toSlug(meta.title);
     
-    // Always candidate slugs: slug-season-year, slug-year, slug-season, slug
-    let urls = [];
-    if (type === 'series' && season && meta.year) {
-        urls.push(`https://malayalamsubtitles.in/release/${slug}-season${season}-${meta.year}/`);
-    }
-    if (meta.year) {
-        urls.push(`https://malayalamsubtitles.in/release/${slug}-${meta.year}/`);
-    }
-    if (type === 'series' && season) {
-        urls.push(`https://malayalamsubtitles.in/release/${slug}-season${season}/`);
-    }
-    urls.push(`https://malayalamsubtitles.in/release/${slug}/`);
-    
-    urls = [...new Set(urls)];
-    
-    for (let u of urls) {
-        console.log(`[TeamGOAT] Checking direct URL candidate: ${u}`);
-        const dlLink = await findDownloadLink(u, imdbId);
-        if (dlLink) {
-            console.log(`[SUCCESS] [TeamGOAT] Found subtitle for "${meta.title}" -> ${dlLink}`);
-            return {
-                id: 'TeamGOAT_' + encodeURIComponent(meta.title),
-                url: dlLink,
-                lang: 'Malayalam',
-                name: `[TeamGOAT] Malayalam - ${meta.title}`,
-                title: "Team GOAT"
-            };
+    // Strategy 1: Index-first lookup
+    if (sitemapIndex.goat.size > 0) {
+        const variants = [];
+        if (type === 'series' && season && meta.year) variants.push(`${slug}-season${season}-${meta.year}`);
+        if (meta.year)                                variants.push(`${slug}-${meta.year}`);
+        if (type === 'series' && season)              variants.push(`${slug}-season${season}`);
+        variants.push(slug);
+        for (const v of variants) {
+            if (sitemapIndex.goat.has(v)) {
+                const url = sitemapIndex.goat.get(v);
+                console.log(`[TeamGOAT] [INDEX HIT] ${v} → ${url}`);
+                const dlLink = await findDownloadLink(url, imdbId);
+                if (dlLink) {
+                    console.log(`[SUCCESS] [TeamGOAT] Found subtitle for "${meta.title}" (index) -> ${dlLink}`);
+                    return { id: 'TeamGOAT_' + encodeURIComponent(meta.title), url: dlLink, lang: 'Malayalam', name: `[TeamGOAT] Malayalam - ${meta.title}`, title: 'Team GOAT' };
+                }
+            }
         }
     }
 
-    // Strategy 3: Site Search Fallback if direct slugs fail
+    // Strategy 2: Direct URL candidates
+    let urls = [];
+    if (type === 'series' && season && meta.year) urls.push(`https://malayalamsubtitles.in/release/${slug}-season${season}-${meta.year}/`);
+    if (meta.year)                                urls.push(`https://malayalamsubtitles.in/release/${slug}-${meta.year}/`);
+    if (type === 'series' && season)              urls.push(`https://malayalamsubtitles.in/release/${slug}-season${season}/`);
+    urls.push(`https://malayalamsubtitles.in/release/${slug}/`);
+    urls = [...new Set(urls)];
+    
+    for (let u of urls) {
+        console.log(`[TeamGOAT] Checking direct URL: ${u}`);
+        const dlLink = await findDownloadLink(u, imdbId);
+        if (dlLink) {
+            console.log(`[SUCCESS] [TeamGOAT] Found subtitle for "${meta.title}" -> ${dlLink}`);
+            return { id: 'TeamGOAT_' + encodeURIComponent(meta.title), url: dlLink, lang: 'Malayalam', name: `[TeamGOAT] Malayalam - ${meta.title}`, title: 'Team GOAT' };
+        }
+    }
+
+    // Strategy 3: Live search fallback
     try {
         const cleanTitleBase = normalizeText(meta.title);
         const cleanSearchQuery = cleanTitleBase.replace(/:/g, ' ').replace(/\s+/g, ' ').trim();
         const searchUrl = `https://malayalamsubtitles.in/?s=${encodeURIComponent(cleanSearchQuery)}`;
-        console.log(`[TeamGOAT] Searching (Strategy 3): ${searchUrl}`);
+        console.log(`[TeamGOAT] Searching (live): ${searchUrl}`);
         const { data } = await httpClient.get(searchUrl);
         const $ = cheerio.load(data);
-        
         let matchUrl = null;
         let matchName = meta.title;
         const normTitle = cleanTitleBase.toLowerCase();
         const cleanTitle = normTitle.replace(/[^a-z0-9]/g, '');
-        
         $('a').each((i, el) => {
             const href = $(el).attr('href');
             const rawText = $(el).text();
@@ -255,52 +491,64 @@ async function searchTeamGoat(meta, type, id) {
                 if (rawText.trim()) matchName = rawText.trim();
             }
         });
-        
         if (matchUrl) {
-            if (!matchUrl.startsWith('http')) {
-                matchUrl = `https://malayalamsubtitles.in${matchUrl.startsWith('/') ? '' : '/'}${matchUrl}`;
-            }
+            if (!matchUrl.startsWith('http')) matchUrl = `https://malayalamsubtitles.in${matchUrl.startsWith('/') ? '' : '/'}${matchUrl}`;
             const dlLink = await findDownloadLink(matchUrl, imdbId);
             if (dlLink) {
                 console.log(`[SUCCESS] [TeamGOAT] Found subtitle for "${meta.title}" -> ${dlLink}`);
-                return {
-                    id: 'TeamGOAT_' + encodeURIComponent(meta.title),
-                    url: dlLink,
-                    lang: 'Malayalam',
-                    name: `[TeamGOAT] Malayalam - ${matchName}`,
-                    title: "Team GOAT"
-                };
+                return { id: 'TeamGOAT_' + encodeURIComponent(meta.title), url: dlLink, lang: 'Malayalam', name: `[TeamGOAT] Malayalam - ${matchName}`, title: 'Team GOAT' };
             }
         }
         console.log(`[NOT FOUND] [TeamGOAT] No subtitle found for "${meta.title}"`);
     } catch (e) {
         console.error(`[ERROR] [TeamGOAT] ${e.message}`);
     }
-
     return null;
 }
 
-async function searchMovieMirror(title, imdbId = null) {
+async function searchMovieMirror(title, imdbId = null, year = null) {
+    // Strategy 1: Index-first lookup
+    if (sitemapIndex.mirror.size > 0) {
+        const slug = toSlug(title);
+        const variants = [];
+        if (year) variants.push(`${slug}-${year}`);
+        variants.push(slug);
+        for (const v of variants) {
+            if (sitemapIndex.mirror.has(v)) {
+                const url = sitemapIndex.mirror.get(v);
+                console.log(`[Movie Mirror] [INDEX HIT] ${v} → ${url}`);
+                const dlLink = await findDownloadLink(url, imdbId);
+                if (dlLink) {
+                    console.log(`[SUCCESS] [Movie Mirror] Found subtitle for "${title}" (index) -> ${dlLink}`);
+                    return { id: 'MovieMirror_' + encodeURIComponent(title), url: dlLink, lang: 'Malayalam', name: `[Movie Mirror] Malayalam - ${title}`, title: 'Movie Mirror' };
+                }
+            }
+        }
+        // Fuzzy: scan for slug prefix
+        for (const [key, url] of sitemapIndex.mirror) {
+            if (key.startsWith(slug + '-') || key === slug) {
+                const dlLink = await findDownloadLink(url, imdbId);
+                if (dlLink) {
+                    console.log(`[SUCCESS] [Movie Mirror] Found subtitle for "${title}" (index fuzzy: ${key}) -> ${dlLink}`);
+                    return { id: 'MovieMirror_' + encodeURIComponent(title), url: dlLink, lang: 'Malayalam', name: `[Movie Mirror] Malayalam - ${title}`, title: 'Movie Mirror' };
+                }
+            }
+        }
+    }
+
+    // Strategy 2: WP REST API search fallback
     try {
         const cleanTitleBase = normalizeText(title);
         const cleanQuery = cleanTitleBase.replace(/:/g, ' ').replace(/\./g, '').replace(/\s+/g, ' ').trim();
         const searchUrl = `https://moviemirrorsubtitles.com/wp-json/wp/v2/posts?search=${encodeURIComponent(cleanQuery)}`;
-        console.log(`[Movie Mirror] Searching: ${searchUrl}`);
+        console.log(`[Movie Mirror] Searching (live): ${searchUrl}`);
         const { data } = await httpClient.get(searchUrl);
-        
         if (data && data.length > 0) {
             for (let post of data) {
-                const postUrl = post.link;
-                const dlLink = await findDownloadLink(postUrl, imdbId);
+                const dlLink = await findDownloadLink(post.link, imdbId);
                 if (dlLink) {
                     console.log(`[SUCCESS] [Movie Mirror] Found subtitle for "${title}" -> ${dlLink}`);
-                    return {
-                        id: 'MovieMirror_' + encodeURIComponent(title),
-                        url: dlLink,
-                        lang: 'Malayalam',
-                        name: `[Movie Mirror] Malayalam - ${title}`,
-                        title: "Movie Mirror"
-                    };
+                    return { id: 'MovieMirror_' + encodeURIComponent(title), url: dlLink, lang: 'Malayalam', name: `[Movie Mirror] Malayalam - ${title}`, title: 'Movie Mirror' };
                 }
             }
         }
@@ -326,6 +574,9 @@ builder.defineSubtitlesHandler(async function(args) {
         return Promise.resolve({ subtitles: cached });
     }
 
+    // ---- DATABASE LOOKUP (fast path) ----
+    // ---- LIVE SEARCH ----
+
     const meta = await getMeta(id, type);
     if (!meta || !meta.title) {
         console.log(`[META ERROR] Could not resolve IMDb ID "${id}" via Cinemeta.`);
@@ -333,16 +584,19 @@ builder.defineSubtitlesHandler(async function(args) {
     }
     console.log(`[META RESOLVED] Title: "${meta.title}", Year: ${meta.year || 'N/A'}`);
 
+    const seasonMatch2 = id.match(/:(\d+):(\d+)$/);
+    const reqSeason = seasonMatch2 ? seasonMatch2[1] : null;
+
     const [msone, goat, mirror] = await Promise.all([
-        searchSite(meta.title, 'https://malayalamsubtitles.org/?s={query}', 'MSone', imdbId),
+        searchMsone(meta.title, imdbId, reqSeason, meta.year),
         searchTeamGoat(meta, type, id),
-        searchMovieMirror(meta.title, imdbId)
+        searchMovieMirror(meta.title, imdbId, meta.year)
     ]);
-    
+
     const seasonMatch = id.match(/:(\d+):(\d+)$/);
     const season = seasonMatch ? parseInt(seasonMatch[1]) : null;
     const episode = seasonMatch ? parseInt(seasonMatch[2]) : null;
-    
+
     let epTag = '';
     if (season !== null && episode !== null) {
         const sStr = String(season).padStart(2, '0');
@@ -354,26 +608,25 @@ builder.defineSubtitlesHandler(async function(args) {
     for (let sub of [msone, goat, mirror]) {
         if (sub) {
             const subCopy = { ...sub };
-            const providerTag = subCopy.title || 'MalSUB'; // e.g. "MSone", "Team GOAT", "Movie Mirror"
-            const cleanTitle = meta.title.replace(/[\\/:*?"<>|]/g, '');
+            const providerTag = subCopy.title || 'MalSUB';
+            const cleanTitle = meta.title.replace(/[\/:*?"<>|]/g, '');
             const filename = `[${providerTag}] ${cleanTitle}${epTag}.srt`;
             const fakeFilename = encodeURIComponent(filename);
-            
+
             let extractParams = `url=${encodeURIComponent(subCopy.url)}`;
             if (season !== null && episode !== null) {
                 extractParams += `&season=${season}&episode=${episode}`;
             }
-            
+
             subCopy.url = `${globalBaseUrl}/extract/${fakeFilename}?${extractParams}`;
             subtitles.push(subCopy);
         }
     }
-    
+
     console.log(`[RESPONSE] Returning ${subtitles.length} Malayalam subtitle(s) for "${meta.title}"`);
     subCache.set(cacheKey, subtitles);
     return Promise.resolve({ subtitles: subtitles });
 });
-
 const app = express();
 app.set('trust proxy', true);
 const addonInterface = builder.getInterface();
@@ -506,6 +759,14 @@ app.get('/api/status', async (req, res) => {
             msone: { name: 'MSone', ...msoneStatus },
             goat: { name: 'TeamGOAT', ...goatStatus },
             mirror: { name: 'Movie Mirror', ...mirrorStatus }
+        },
+        index: {
+            msone: sitemapIndex.msone.size,
+            mirror: sitemapIndex.mirror.size,
+            goat: sitemapIndex.goat.size,
+            total: sitemapIndex.msone.size + sitemapIndex.mirror.size + sitemapIndex.goat.size,
+            lastRefreshed: sitemapIndex.lastRefreshed || 'not yet',
+            mongodb: mongoCollection ? 'connected' : (MONGO_URI ? 'error' : 'not configured')
         }
     };
     statusCacheTime = now;
@@ -543,9 +804,9 @@ app.get('/api/search', async (req, res) => {
         
         const searchPromises = topMetas.map(async (meta) => {
             const [msone, goat, mirror] = await Promise.all([
-                searchSite(meta.title, 'https://malayalamsubtitles.org/?s={query}', 'MSone', meta.imdbId),
+                searchMsone(meta.title, meta.imdbId, null, meta.year),
                 searchTeamGoat(meta, meta.type, meta.imdbId || 'tt0000000'),
-                searchMovieMirror(meta.title, meta.imdbId)
+                searchMovieMirror(meta.title, meta.imdbId, meta.year)
             ]);
 
             return {
@@ -922,11 +1183,21 @@ app.get('/', (req, res) => {
 
 const addonRouter = require('stremio-addon-sdk/src/getRouter')(addonInterface);
 app.use('/', addonRouter);
-
 const port = process.env.PORT || 7000;
 app.listen(port, () => {
     console.log(`Addon is running at http://localhost:${port}/manifest.json`);
-    
+
+    // Connect to MongoDB, warm-load index, then refresh from sitemaps
+    (async () => {
+        await connectMongo();
+        const warmed = await warmLoadFromMongo();
+        console.log(`[STARTUP] Warm-loaded ${warmed} slugs from MongoDB`);
+        // Always refresh from sitemaps on startup to pick up new posts
+        refreshSitemapIndex().catch(e => console.error('[INDEX] Startup refresh failed:', e.message));
+    })();
+    // Refresh index every 6 hours
+    setInterval(() => refreshSitemapIndex().catch(e => console.error('[INDEX] Refresh failed:', e.message)), 6 * 60 * 60 * 1000);
+
     // Render Keep-Alive Ping (Runs every 14 minutes if URL env var is present)
     const pingUrl = process.env.RENDER_EXTERNAL_URL || process.env.PING_URL;
     if (pingUrl) {
@@ -942,4 +1213,3 @@ app.listen(port, () => {
         }, 14 * 60 * 1000); // Ping every 14 minutes (Render spins down at 15m)
     }
 });
-
