@@ -4,7 +4,7 @@ services:
     runtime: node
     plan: free
     branch: groku
-    buildCommand: npm install && npm run build:render
+    buildCommand: npm install --include=dev && npm run build:render
     startCommand: node .output/server/index.mjs
     healthCheckPath: /health
     envVars:
