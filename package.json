@@ -9,7 +9,7 @@
   "scripts": {
     "dev": "node scripts/with-app-env.mjs vite dev --host 0.0.0.0 --port 8080",
     "build": "node scripts/with-app-env.mjs vite build",
-    "build:render": "NITRO_PRESET=node-server node scripts/with-app-env.mjs vite build",
+    "build:render": "NITRO_PRESET=node-server node ./node_modules/vite/bin/vite.js build",
     "start": "node .output/server/index.mjs",
     "typecheck": "tsc --noEmit",
     "lint": "eslint ."
