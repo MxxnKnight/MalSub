@@ -1,1 +1,1 @@
-PLACEHOLDER
+# Paths embedded in catalog.ts as MSONE_SEED_PATHS
