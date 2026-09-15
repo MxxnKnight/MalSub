@@ -44,11 +44,11 @@ function decodeEntities(value: string) {
       String.fromCharCode(parseInt(hex, 16)),
     )
     .replace(/&#(\d+);/g, (_, num: string) => String.fromCharCode(Number(num)))
-    .replace(/&/g, "&")
-    .replace(/"/g, '"')
-    .replace(/'/g, "'")
-    .replace(/</g, "<")
-    .replace(/>/g, ">")
+    .replace(/&amp;/g, "&")
+    .replace(/&quot;/g, '"')
+    .replace(/&#39;/g, "'")
+    .replace(/&lt;/g, "<")
+    .replace(/&gt;/g, ">")
     .replace(/&nbsp;/g, " ");
 }
 
@@ -124,11 +124,44 @@ async function fetchText(url: string, timeoutMs: number) {
     signal: AbortSignal.timeout(timeoutMs),
     headers: {
       "User-Agent": UA,
-      Accept: "text/html,application/xml,text/plain;q=0.9,*/*;q=0.8",
+      Accept: "application/xml,text/xml,text/html,application/xhtml+xml;q=0.9,*/*;q=0.8",
       "Accept-Language": "en-US,en;q=0.9",
+      "Cache-Control": "no-cache",
     },
   });
   return { ok: res.ok, status: res.status, text: await res.text() };
+}
+
+/** Cloudflare often blocks cloud IPs; jina.ai reader is a public proxy fallback. */
+async function fetchTextWithFallback(url: string, timeoutMs: number) {
+  try {
+    const direct = await fetchText(url, timeoutMs);
+    if (direct.ok && direct.text.length > 200 && !isBlockedBody(direct.text)) {
+      return { ...direct, via: "direct" as const };
+    }
+  } catch {
+    // try proxy
+  }
+  try {
+    const proxy = await fetchText(`https://r.jina.ai/${url}`, timeoutMs + 4000);
+    if (proxy.ok && proxy.text.length > 200) {
+      return { ...proxy, via: "jina" as const };
+    }
+    return { ...proxy, via: "jina" as const };
+  } catch {
+    return { ok: false, status: 0, text: "", via: "failed" as const };
+  }
+}
+
+function isBlockedBody(text: string) {
+  const head = text.slice(0, 800).toLowerCase();
+  return (
+    head.includes("just a moment") ||
+    head.includes("cf-browser-verification") ||
+    head.includes("attention required") ||
+    head.includes("access denied") ||
+    (head.includes("cloudflare") && !head.includes("<urlset") && !head.includes("<sitemapindex"))
+  );
 }
 
 function parseMsoneArticles(html: string): SearchHit[] {
@@ -168,10 +201,15 @@ function parseMsoneArticles(html: string): SearchHit[] {
 function parseMsoneSitemap(xml: string): SearchHit[] {
   const hits: SearchHit[] = [];
   const seen = new Set<string>();
+  // Prefer /languages/ pages; also accept any deep post URL with a year-ish slug
   for (const block of xml.split("<url>").slice(1)) {
-    const loc = block.match(
-      /<loc>(https:\/\/malayalamsubtitles\.org\/languages\/[^<]+)<\/loc>/,
-    )?.[1];
+    const loc =
+      block.match(
+        /<loc>(https:\/\/malayalamsubtitles\.org\/languages\/[^<]+)<\/loc>/,
+      )?.[1] ??
+      block.match(
+        /<loc>(https:\/\/malayalamsubtitles\.org\/(?:english|hindi|spanish|french|german|korean|japanese|chinese|tamil|telugu)\/[^<]+)<\/loc>/,
+      )?.[1];
     if (!loc || seen.has(loc)) continue;
     seen.add(loc);
     const slug = loc.replace(/\/$/, "").split("/").pop() ?? "";
@@ -183,6 +221,20 @@ function parseMsoneSitemap(xml: string): SearchHit[] {
       )?.[1] ?? null;
     const lastmod = block.match(/<lastmod>([^<]+)<\/lastmod>/)?.[1] ?? null;
     hits.push(hit({ title, url: loc, year, kind: kindFrom(slug), poster, lastmod }));
+  }
+  // Jina markdown fallback: plain URLs on their own lines
+  if (hits.length === 0) {
+    const urlRe =
+      /https:\/\/malayalamsubtitles\.org\/languages\/[a-z0-9\-./]+/gi;
+    for (const loc of xml.match(urlRe) ?? []) {
+      const clean = loc.replace(/[),.]+$/, "");
+      if (seen.has(clean)) continue;
+      seen.add(clean);
+      const slug = clean.replace(/\/$/, "").split("/").pop() ?? "";
+      if (!slug) continue;
+      const { title, year } = titleFromSlug(slug);
+      hits.push(hit({ title, url: clean, year, kind: kindFrom(slug) }));
+    }
   }
   return hits;
 }
@@ -301,9 +353,9 @@ async function collectMsone(): Promise<{
   ok: boolean;
 }> {
   try {
-    const index = await fetchText(
+    const index = await fetchTextWithFallback(
       "https://malayalamsubtitles.org/sitemap_index.xml",
-      8000,
+      12000,
     );
     const maps = [
       ...new Set(
@@ -320,29 +372,37 @@ async function collectMsone(): Promise<{
         "https://malayalamsubtitles.org/post-sitemap4.xml",
       );
     }
+
     const pages = await Promise.all(
-      maps.map((url) =>
-        fetchText(url, 12000).catch(() => ({ ok: false, status: 0, text: "" })),
-      ),
+      maps.map((url) => fetchTextWithFallback(url, 20000)),
     );
+    const statuses = pages.map((p) => `${p.status}/${p.via}`).join(",");
     const fromMaps = pages.flatMap((page) => parseMsoneSitemap(page.text));
-    const recent = await fetchText(
+
+    const recent = await fetchTextWithFallback(
       "https://malayalamsubtitles.org/releases/",
-      8000,
+      12000,
     );
     const fromRecent = parseMsoneArticles(recent.text);
+
     const byUrl = new Map<string, SearchHit>();
     for (const item of [...fromMaps, ...fromRecent]) byUrl.set(item.url, item);
     const items = [...byUrl.values()];
+    const usedProxy = [index, ...pages, recent].some((p) => p.via === "jina");
+
     return {
       items,
       ok: items.length > 0,
       note: items.length
-        ? `Sitemap index · ${maps.length} post maps`
-        : "MSone sitemap returned no titles",
+        ? `Sitemap · ${maps.length} maps · ${fromMaps.length} urls${usedProxy ? " · via proxy" : ""}`
+        : `MSone empty (index ${index.status}/${index.via}; maps ${statuses})`,
     };
-  } catch {
-    return { items: [], ok: false, note: "MSone sitemap fetch failed" };
+  } catch (error) {
+    return {
+      items: [],
+      ok: false,
+      note: `MSone fetch failed: ${error instanceof Error ? error.message : "error"}`,
+    };
   }
 }
 
@@ -352,16 +412,16 @@ async function collectGoat(): Promise<{
   ok: boolean;
 }> {
   try {
-    const { text } = await fetchText(
+    const page = await fetchTextWithFallback(
       "https://malayalamsubtitles.in/search-and-download/",
-      8000,
+      12000,
     );
-    const items = parseGoatCatalog(text);
+    const items = parseGoatCatalog(page.text);
     return {
       items,
       ok: items.length > 0,
       note: items.length
-        ? "HTML catalog index (no XML sitemap published)"
+        ? `HTML catalog index${page.via === "jina" ? " · via proxy" : ""}`
         : "Team GOAT catalog was empty",
     };
   } catch {
@@ -376,17 +436,21 @@ async function collectMm(): Promise<{
 }> {
   const seed = await loadMmSeed();
   try {
-    const sitemap = await fetchText(
+    const sitemap = await fetchTextWithFallback(
       "https://moviemirrorsubtitles.com/sitemap.xml",
-      8000,
+      12000,
     );
-    if (sitemap.ok && sitemap.text.includes("<url>")) {
+    if (sitemap.ok && (sitemap.text.includes("<url>") || sitemap.text.includes("http"))) {
       const items = parseGenericSitemap(
         sitemap.text,
         "moviemirrorsubtitles.com",
       );
       if (items.length > 40) {
-        return { items, ok: true, note: "XML sitemap" };
+        return {
+          items,
+          ok: true,
+          note: sitemap.via === "jina" ? "XML sitemap · via proxy" : "XML sitemap",
+        };
       }
     }
   } catch {
@@ -396,7 +460,7 @@ async function collectMm(): Promise<{
   try {
     const { text } = await fetchText(
       "https://r.jina.ai/https://moviemirrorsubtitles.com/subtitles/",
-      9000,
+      12000,
     );
     const live = parseMmMarkdown(text);
     if (live.length > 40) {
@@ -558,4 +622,3 @@ function scheduleAutofetch() {
 }
 
 scheduleAutofetch();
-
