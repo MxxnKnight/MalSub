@@ -3,7 +3,8 @@ services:
     name: malsub
     runtime: node
     plan: free
-    buildCommand: npm run build:render
+    branch: groku
+    buildCommand: npm install && npm run build:render
     startCommand: node .output/server/index.mjs
     healthCheckPath: /health
     envVars:
