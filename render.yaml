@@ -1,0 +1,19 @@
+services:
+  - type: web
+    name: malsub
+    runtime: node
+    plan: free
+    buildCommand: npm run build:render
+    startCommand: node .output/server/index.mjs
+    healthCheckPath: /health
+    envVars:
+      - key: NODE_VERSION
+        value: "22"
+      - key: NITRO_PRESET
+        value: node-server
+      - key: NODE_OPTIONS
+        value: --max-old-space-size=384
+      - key: AUTO_FETCH
+        value: "1"
+      - key: MONGODB_URI
+        sync: false
