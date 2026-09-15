@@ -1,5 +1,5 @@
 {
-  "name": "app-builder-workspace",
+  "name": "malsub",
   "private": true,
   "sideEffects": false,
   "type": "module",
@@ -8,19 +8,11 @@
   },
   "scripts": {
     "dev": "node scripts/with-app-env.mjs vite dev --host 0.0.0.0 --port 8080",
-    "build": "node scripts/with-app-env.mjs vite build && npm run db:migrate",
+    "build": "node scripts/with-app-env.mjs vite build",
     "build:render": "NITRO_PRESET=node-server node scripts/with-app-env.mjs vite build",
     "start": "node .output/server/index.mjs",
-    "db:migrate": "node scripts/migrate.mjs",
-    "build:dev": "node scripts/with-app-env.mjs vite build --mode development",
-    "preview": "node scripts/with-app-env.mjs vite preview",
-    "preview:restart": "node scripts/preview.mjs restart",
-    "preview:stop": "node scripts/preview.mjs stop",
     "typecheck": "tsc --noEmit",
-    "check:auth": "node scripts/check-auth-invariant.mjs",
-    "test": "node --test 'scripts/**/*.test.mjs' && node --experimental-strip-types --test src/lib/app-data/app-data.test.ts src/lib/auth/gate-identity.test.ts",
-    "lint": "eslint .",
-    "format": "prettier --write ."
+    "lint": "eslint ."
   },
   "dependencies": {
     "@electric-sql/pglite": "^0.5.4",
@@ -91,7 +83,6 @@
     "globals": "^15.15.0",
     "lightningcss": "^1.28.0",
     "nitro": "3.0.260610-beta",
-    "playwright": "^1.62.0",
     "prettier": "^3.4.0",
     "typescript": "^5.7.0",
     "typescript-eslint": "^8.56.1",
