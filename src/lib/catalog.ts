@@ -65,25 +65,18 @@ function yearFrom(text: string): number | null {
 }
 
 function kindFrom(text: string): TitleKind {
-  return /season|series|s\d{2}|k-drama|episode|സീസൺ|സീസണ്/i.test(text)
-    ? "series"
-    : "movie";
+  return /season|series|s\d{2}|k-drama|episode/i.test(text) ? "series" : "movie";
 }
 
 function titleFromSlug(slug: string) {
   const year = yearFrom(slug);
   const base = slug.replace(/-(?:19|20)\d{2}$/, "").replace(/-/g, " ").trim();
   const titled = base.replace(/\b[a-z]/g, (c) => c.toUpperCase());
-  return {
-    title: year ? `${titled} (${year})` : titled,
-    year,
-  };
+  return { title: year ? `${titled} (${year})` : titled, year };
 }
 
 function seasonFrom(text: string): number | null {
-  const match = text.match(
-    /(?:season|സീസൺ|സീസണ്)[\s._-]*0*(\d{1,2})|\bs0*(\d{1,2})\b/i,
-  );
+  const match = text.match(/(?:season)[\s._-]*0*(\d{1,2})|\bs0*(\d{1,2})\b/i);
   if (!match) return null;
   const n = Number(match[1] || match[2]);
   return n >= 1 && n <= 40 ? n : null;
@@ -91,9 +84,8 @@ function seasonFrom(text: string): number | null {
 
 function seriesTitleFrom(title: string) {
   return title
-    .replace(/\s*[–—-]\s*[\u0d00-\u0d7f].*$/u, "")
     .replace(/\(\s*(?:19|20)\d{2}\s*\)/g, "")
-    .replace(/(?:season|സീസൺ)\s*0*\d+/gi, "")
+    .replace(/(?:season)\s*0*\d+/gi, "")
     .replace(/\bs0*\d{1,2}\b/gi, "")
     .replace(/[()]/g, " ")
     .replace(/\s{2,}/g, " ")
@@ -105,8 +97,7 @@ function hit(
     Partial<Pick<SearchHit, "poster" | "subtitleUrl" | "lastmod" | "season" | "seriesTitle">>,
 ): SearchHit {
   const kind = partial.kind;
-  const season =
-    partial.season ?? seasonFrom(`${partial.title} ${partial.url}`);
+  const season = partial.season ?? seasonFrom(`${partial.title} ${partial.url}`);
   return {
     ...partial,
     poster: partial.poster ?? null,
@@ -141,9 +132,7 @@ async function fetchTextWithFallback(url: string, timeoutMs: number) {
     if (direct.ok && direct.text.length > 200 && !isBlockedBody(direct.text)) {
       return { ...direct, via: "direct" as const };
     }
-  } catch {
-    // try proxy
-  }
+  } catch {}
   try {
     const proxy = await fetchText(`https://r.jina.ai/${url}`, timeoutMs + 4000);
     return { ...proxy, via: "jina" as const };
@@ -174,9 +163,7 @@ function parseMsoneArticles(html: string): SearchHit[] {
       article.match(/href="(https:\/\/malayalamsubtitles\.org\/[^"]+)"/)?.[1] ?? null;
     if (!href || href.includes("/search/") || href.endsWith("/releases/")) continue;
     const alt = article.match(/alt="([^"]+)"/)?.[1];
-    const heading = article.match(
-      /<h[12][^>]*>\s*<a[^>]*>([\s\S]*?)<\/a>/i,
-    )?.[1];
+    const heading = article.match(/<h[12][^>]*>\s*<a[^>]*>([\s\S]*?)<\/a>/i)?.[1];
     const title = stripTags(alt || heading || "");
     if (!title) continue;
     const poster =
@@ -184,23 +171,12 @@ function parseMsoneArticles(html: string): SearchHit[] {
         /src="(https:\/\/malayalamsubtitles\.org\/[^"]+\.(?:jpg|jpeg|png|webp)[^"]*)"/i,
       )?.[1] ?? null;
     const series =
-      /release-type-series|category-series|season/i.test(article) ||
-      kindFrom(title) === "series";
-    hits.push(
-      hit({
-        title,
-        url: href,
-        year: yearFrom(title),
-        kind: series ? "series" : "movie",
-        poster,
-      }),
-    );
+      /release-type-series|category-series|season/i.test(article) || kindFrom(title) === "series";
+    hits.push(hit({ title, url: href, year: yearFrom(title), kind: series ? "series" : "movie", poster }));
   }
   if (hits.length === 0) {
     const seen = new Set<string>();
-    for (const loc of html.match(
-      /https:\/\/malayalamsubtitles\.org\/languages\/[a-z0-9\-./]+/gi,
-    ) ?? []) {
+    for (const loc of html.match(/https:\/\/malayalamsubtitles\.org\/languages\/[a-z0-9\-./]+/gi) ?? []) {
       const clean = loc.replace(/[),.]+$/, "");
       if (seen.has(clean)) continue;
       seen.add(clean);
@@ -223,14 +199,7 @@ function parseMsoneRss(xml: string): SearchHit[] {
     const title = stripTags(rawTitle);
     const link = block.match(/<link>([^<]+)<\/link>/)?.[1]?.trim();
     if (!title || !link || !link.includes("malayalamsubtitles.org")) continue;
-    hits.push(
-      hit({
-        title,
-        url: link,
-        year: yearFrom(title) ?? yearFrom(link),
-        kind: kindFrom(`${title} ${link}`),
-      }),
-    );
+    hits.push(hit({ title, url: link, year: yearFrom(title) ?? yearFrom(link), kind: kindFrom(`${title} ${link}`) }));
   }
   return hits;
 }
@@ -239,18 +208,14 @@ function parseMsoneSitemap(xml: string): SearchHit[] {
   const hits: SearchHit[] = [];
   const seen = new Set<string>();
   for (const block of xml.split("<url>").slice(1)) {
-    const loc = block.match(
-      /<loc>(https:\/\/malayalamsubtitles\.org\/languages\/[^<]+)<\/loc>/,
-    )?.[1];
+    const loc = block.match(/<loc>(https:\/\/malayalamsubtitles\.org\/languages\/[^<]+)<\/loc>/)?.[1];
     if (!loc || seen.has(loc)) continue;
     seen.add(loc);
     const slug = loc.replace(/\/$/, "").split("/").pop() ?? "";
     if (!slug) continue;
     const { title, year } = titleFromSlug(slug);
     const poster =
-      block.match(
-        /<image:loc>(https:\/\/malayalamsubtitles\.org\/[^<]+)<\/image:loc>/,
-      )?.[1] ?? null;
+      block.match(/<image:loc>(https:\/\/malayalamsubtitles\.org\/[^<]+)<\/image:loc>/)?.[1] ?? null;
     const lastmod = block.match(/<lastmod>([^<]+)<\/lastmod>/)?.[1] ?? null;
     hits.push(hit({ title, url: loc, year, kind: kindFrom(slug), poster, lastmod }));
   }
@@ -260,21 +225,13 @@ function parseMsoneSitemap(xml: string): SearchHit[] {
 function parseGoatCatalog(html: string): SearchHit[] {
   const hits: SearchHit[] = [];
   const seen = new Set<string>();
-  const re =
-    /<a href="(\/release\/[^"]+)"[^>]*>\s*<h5 class="card-title name[^"]*">([\s\S]*?)<\/h5>/gi;
+  const re = /<a href="(\/release\/[^"]+)"[^>]*>\s*<h5 class="card-title name[^"]*">([\s\S]*?)<\/h5>/gi;
   for (const match of html.matchAll(re)) {
     const path = match[1];
     const title = stripTags(match[2] ?? "");
     if (!title || seen.has(path)) continue;
     seen.add(path);
-    hits.push(
-      hit({
-        title,
-        url: `https://malayalamsubtitles.in${path}`,
-        year: yearFrom(title),
-        kind: kindFrom(title),
-      }),
-    );
+    hits.push(hit({ title, url: `https://malayalamsubtitles.in${path}`, year: yearFrom(title), kind: kindFrom(title) }));
   }
   return hits;
 }
@@ -289,14 +246,7 @@ function parseMmMarkdown(markdown: string): SearchHit[] {
     if (!title || !url || seen.has(url)) continue;
     if (/\/(category|tag|page)\//i.test(url)) continue;
     seen.add(url);
-    hits.push(
-      hit({
-        title,
-        url,
-        year: yearFrom(title) ?? yearFrom(url),
-        kind: kindFrom(`${title} ${url}`),
-      }),
-    );
+    hits.push(hit({ title, url, year: yearFrom(title) ?? yearFrom(url), kind: kindFrom(`${title} ${url}`) }));
   }
   return hits;
 }
@@ -308,12 +258,7 @@ function parseGenericSitemap(xml: string, host: string): SearchHit[] {
     const loc = block.match(/<loc>(https?:\/\/[^<]+)<\/loc>/)?.[1];
     if (!loc || seen.has(loc) || !loc.includes(host)) continue;
     const path = loc.replace(/https?:\/\/[^/]+/, "");
-    if (
-      path === "/" ||
-      /\/(category|tag|page|about|contact|feed|wp-)/i.test(path)
-    ) {
-      continue;
-    }
+    if (path === "/" || /\/(category|tag|page|about|contact|feed|wp-)/i.test(path)) continue;
     const slug = loc.replace(/\/$/, "").split("/").pop() ?? "";
     if (!slug || slug.endsWith(".xml")) continue;
     seen.add(loc);
@@ -327,15 +272,10 @@ function parseGenericSitemap(xml: string, host: string): SearchHit[] {
 async function loadMmSeed(): Promise<SearchHit[]> {
   try {
     const mod = (await import("@/lib/data/mm-catalog.json")).default as Array<
-      Omit<SearchHit, "poster" | "subtitleUrl"> &
-        { poster?: string | null; subtitleUrl?: string | null }
+      Omit<SearchHit, "poster" | "subtitleUrl"> & { poster?: string | null; subtitleUrl?: string | null }
     >;
     return (Array.isArray(mod) ? mod : []).map((row) =>
-      hit({
-        ...row,
-        poster: row.poster ?? null,
-        subtitleUrl: row.subtitleUrl ?? null,
-      }),
+      hit({ ...row, poster: row.poster ?? null, subtitleUrl: row.subtitleUrl ?? null }),
     );
   } catch {
     return [];
@@ -371,9 +311,8 @@ async function collectMsone(
 ): Promise<{ items: SearchHit[]; note: string | null; ok: boolean }> {
   const byUrl = new Map<string, SearchHit>();
   const sources: string[] = [];
-
   const effective: "full" | "incremental" =
-    mode === "auto" ? (existingCount < 500 ? "full" : "incremental") : mode;
+    mode === "auto" ? (existingCount < 1500 ? "full" : "incremental") : mode;
 
   try {
     const feed = await fetchText("https://malayalamsubtitles.org/feed/", 12000);
@@ -382,9 +321,7 @@ async function collectMsone(
       for (const item of rss) byUrl.set(item.url, item);
       if (rss.length) sources.push(`rss:${rss.length}`);
     }
-  } catch {
-    // continue
-  }
+  } catch {}
 
   const maxPages = effective === "full" ? 30 : 5;
   let releaseHits = 0;
@@ -418,9 +355,7 @@ async function collectMsone(
       );
       const maps = [
         ...new Set(
-          (index.text.match(
-            /https:\/\/malayalamsubtitles\.org\/post-sitemap\d*\.xml/g,
-          ) ?? []) as string[],
+          (index.text.match(/https:\/\/malayalamsubtitles\.org\/post-sitemap\d*\.xml/g) ?? []) as string[],
         ),
       ];
       if (maps.length === 0) {
@@ -431,9 +366,7 @@ async function collectMsone(
           "https://malayalamsubtitles.org/post-sitemap4.xml",
         );
       }
-      const pages = await Promise.all(
-        maps.map((url) => fetchTextWithFallback(url, 20000)),
-      );
+      const pages = await Promise.all(maps.map((url) => fetchTextWithFallback(url, 20000)));
       let mapHits = 0;
       for (const page of pages) {
         for (const item of parseMsoneSitemap(page.text)) {
@@ -444,9 +377,7 @@ async function collectMsone(
         }
       }
       if (mapHits) sources.push(`sitemap:${mapHits}`);
-    } catch {
-      // continue to seed
-    }
+    } catch {}
   }
 
   if (byUrl.size < 100) {
@@ -471,16 +402,9 @@ async function collectMsone(
   };
 }
 
-async function collectGoat(): Promise<{
-  items: SearchHit[];
-  note: string | null;
-  ok: boolean;
-}> {
+async function collectGoat(): Promise<{ items: SearchHit[]; note: string | null; ok: boolean }> {
   try {
-    const page = await fetchTextWithFallback(
-      "https://malayalamsubtitles.in/search-and-download/",
-      12000,
-    );
+    const page = await fetchTextWithFallback("https://malayalamsubtitles.in/search-and-download/", 12000);
     const items = parseGoatCatalog(page.text);
     return {
       items,
@@ -494,17 +418,10 @@ async function collectGoat(): Promise<{
   }
 }
 
-async function collectMm(): Promise<{
-  items: SearchHit[];
-  note: string | null;
-  ok: boolean;
-}> {
+async function collectMm(): Promise<{ items: SearchHit[]; note: string | null; ok: boolean }> {
   const seed = await loadMmSeed();
   try {
-    const sitemap = await fetchTextWithFallback(
-      "https://moviemirrorsubtitles.com/sitemap.xml",
-      12000,
-    );
+    const sitemap = await fetchTextWithFallback("https://moviemirrorsubtitles.com/sitemap.xml", 12000);
     if (sitemap.ok && (sitemap.text.includes("<url>") || sitemap.text.includes("http"))) {
       const items = parseGenericSitemap(sitemap.text, "moviemirrorsubtitles.com");
       if (items.length > 40) {
@@ -515,81 +432,55 @@ async function collectMm(): Promise<{
         };
       }
     }
-  } catch {
-    // bot wall
-  }
-
+  } catch {}
   try {
-    const { text } = await fetchText(
-      "https://r.jina.ai/https://moviemirrorsubtitles.com/subtitles/",
-      12000,
-    );
+    const { text } = await fetchText("https://r.jina.ai/https://moviemirrorsubtitles.com/subtitles/", 12000);
     const live = parseMmMarkdown(text);
-    if (live.length > 40) {
-      return { items: live, ok: true, note: "Listing index via reader" };
-    }
-  } catch {
-    // seed fallback
-  }
-
+    if (live.length > 40) return { items: live, ok: true, note: "Listing index via reader" };
+  } catch {}
   if (seed.length > 0) {
-    return {
-      items: seed,
-      ok: true,
-      note: "Movie Mirror sitemap is bot-walled; stored listing snapshot",
-    };
+    return { items: seed, ok: true, note: "Movie Mirror sitemap is bot-walled; stored listing snapshot" };
   }
-  return {
-    items: [],
-    ok: false,
-    note: "Movie Mirror is bot-protected from this host",
-  };
+  return { items: [], ok: false, note: "Movie Mirror is bot-protected from this host" };
 }
 
-export const catalogStats = createServerFn({ method: "GET" }).handler(
-  async (): Promise<CatalogStats> => {
-    const store = await import("@/lib/catalog-store");
-    const { total, bySource } = await store.countTitles();
-    const fetches = await store.latestFetches();
-    const fetchMap = new Map<string, (typeof fetches)[number]>();
-    for (const row of fetches) {
-      if (!fetchMap.has(row.sourceId)) fetchMap.set(row.sourceId, row);
-    }
-    const sources = SOURCES.map((source) => {
-      const fetch = fetchMap.get(source.id);
-      return {
-        id: source.id,
-        name: source.name,
-        count: bySource.get(source.id) ?? 0,
-        lastFetchedAt: fetch?.fetchedAt ?? null,
-        lastOk: fetch ? fetch.ok : null,
-        lastMs: fetch?.ms ?? null,
-        note: fetch?.note ?? null,
-        inserted: fetch?.inserted ?? 0,
-        updated: fetch?.updated ?? 0,
-        indexUrl: source.indexUrl,
-      };
-    });
+export const catalogStats = createServerFn({ method: "GET" }).handler(async (): Promise<CatalogStats> => {
+  const store = await import("@/lib/catalog-store");
+  const { total, bySource } = await store.countTitles();
+  const fetches = await store.latestFetches();
+  const fetchMap = new Map<string, (typeof fetches)[number]>();
+  for (const row of fetches) {
+    if (!fetchMap.has(row.sourceId)) fetchMap.set(row.sourceId, row);
+  }
+  const sources = SOURCES.map((source) => {
+    const fetch = fetchMap.get(source.id);
     return {
-      total,
-      lastFetchedAt: fetches[0]?.fetchedAt ?? null,
-      engine: store.catalogEngine(),
-      database: store.catalogEngine() === "mongodb" ? "MALsub" : "local",
-      sources,
+      id: source.id,
+      name: source.name,
+      count: bySource.get(source.id) ?? 0,
+      lastFetchedAt: fetch?.fetchedAt ?? null,
+      lastOk: fetch ? fetch.ok : null,
+      lastMs: fetch?.ms ?? null,
+      note: fetch?.note ?? null,
+      inserted: fetch?.inserted ?? 0,
+      updated: fetch?.updated ?? 0,
+      indexUrl: source.indexUrl,
     };
-  },
-);
+  });
+  return {
+    total,
+    lastFetchedAt: fetches[0]?.fetchedAt ?? null,
+    engine: store.catalogEngine(),
+    database: store.catalogEngine() === "mongodb" ? "MALsub" : "local",
+    sources,
+  };
+});
 
 export async function runCatalogFetch(
   mode: CatalogFetchMode = "auto",
-): Promise<{
-  fetchedAt: string;
-  engine: "mongodb" | "postgres";
-  sources: FetchReport[];
-}> {
+): Promise<{ fetchedAt: string; engine: "mongodb" | "postgres"; sources: FetchReport[] }> {
   const store = await import("@/lib/catalog-store");
   const { bySource } = await store.countTitles();
-
   const collectors: Record<
     SourceId,
     () => Promise<{ items: SearchHit[]; note: string | null; ok: boolean }>
@@ -605,9 +496,7 @@ export async function runCatalogFetch(
       try {
         const { items, note, ok } = await collectors[source.id]();
         const counts =
-          items.length > 0
-            ? await store.upsertTitles(source.id, items)
-            : { count: 0, inserted: 0, updated: 0 };
+          items.length > 0 ? await store.upsertTitles(source.id, items) : { count: 0, inserted: 0, updated: 0 };
         const ms = Date.now() - started;
         await store.recordFetch({
           sourceId: source.id,
@@ -655,34 +544,30 @@ export async function runCatalogFetch(
     }),
   );
 
-  return {
-    fetchedAt: new Date().toISOString(),
-    engine: store.catalogEngine(),
-    sources: reports,
-  };
+  return { fetchedAt: new Date().toISOString(), engine: store.catalogEngine(), sources: reports };
 }
 
-export const fetchCatalogs = createServerFn({ method: "POST" }).handler(
-  async (): Promise<{
-    fetchedAt: string;
-    engine: "mongodb" | "postgres";
-    sources: FetchReport[];
-  }> => {
-    return runCatalogFetch();
-  },
-);
+export const fetchCatalogs = createServerFn({ method: "POST" })
+  .validator((data: { mode?: string } | undefined) => {
+    const raw = String(data?.mode ?? "auto").toLowerCase();
+    const mode: CatalogFetchMode =
+      raw === "full" || raw === "incremental" || raw === "auto" ? raw : "auto";
+    return { mode };
+  })
+  .handler(async ({ data }): Promise<{ fetchedAt: string; engine: "mongodb" | "postgres"; sources: FetchReport[] }> => {
+    return runCatalogFetch(data.mode);
+  });
 
 function scheduleAutofetch() {
   if (typeof window !== "undefined") return;
-  const enabled =
-    Boolean(process.env.RENDER) || process.env.AUTO_FETCH === "1";
+  const enabled = Boolean(process.env.RENDER) || process.env.AUTO_FETCH === "1";
   if (!enabled) return;
   const g = globalThis as typeof globalThis & { __malsubAutoFetch__?: boolean };
   if (g.__malsubAutoFetch__) return;
   g.__malsubAutoFetch__ = true;
   const tick = async () => {
     try {
-      await runCatalogFetch();
+      await runCatalogFetch("auto");
     } catch (error) {
       console.error("[malsub] autofetch failed", error);
     }
