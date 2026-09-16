@@ -1,7 +1,5 @@
-# Daily catalog refresh for MalSUB (all three sources in one job).
-# Must live on default branch (main) so GitHub shows "Run workflow".
-# When running manually, pick branch "groku" so checkout has scripts/catalog-cron.mjs.
-#
+# Catalog fetch — lives on default branch (main) so Actions shows "Run workflow".
+# Always checks out groku for app scripts + package.json.
 # Required secret: MONGODB_URI
 
 name: Catalog fetch
@@ -12,14 +10,14 @@ on:
   workflow_dispatch:
     inputs:
       mode:
-        description: "full = deep index · incremental = new releases · auto = decide from DB counts"
+        description: "full = deep index · incremental = new releases · auto = from DB counts"
         required: true
-        default: auto
+        default: full
         type: choice
         options:
-          - auto
           - full
           - incremental
+          - auto
 
 concurrency:
   group: catalog-fetch
@@ -32,19 +30,10 @@ jobs:
     timeout-minutes: 45
 
     steps:
-      - name: Checkout
+      - name: Checkout groku (app + cron script)
         uses: actions/checkout@v4
         with:
-          # Prefer groku (app code + catalog-cron). Fall back to the branch that triggered the run.
-          ref: ${{ github.event.inputs.mode && 'groku' || github.ref }}
-
-      - name: Prefer groku branch for app scripts
-        run: |
-          git fetch origin groku:groku || true
-          if git rev-parse --verify groku >/dev/null 2>&1; then
-            git checkout groku
-          fi
-          test -f scripts/catalog-cron.mjs || { echo "scripts/catalog-cron.mjs missing"; ls -la; exit 1; }
+          ref: groku
 
       - name: Setup Node
         uses: actions/setup-node@v4
@@ -59,5 +48,5 @@ jobs:
         env:
           MONGODB_URI: ${{ secrets.MONGODB_URI }}
           MONGO_DB_NAME: MALsub
-          CATALOG_MODE: ${{ github.event.inputs.mode || 'auto' }}
+          CATALOG_MODE: ${{ github.event.inputs.mode || 'full' }}
         run: node scripts/catalog-cron.mjs
