@@ -1,9 +1,10 @@
 import { useEffect, useState } from "react";
-import { Database, LoaderCircle, RefreshCw } from "lucide-react";
+import { Database, LoaderCircle, RefreshCw, Library } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import {
   catalogStats,
   fetchCatalogs,
+  type CatalogFetchMode,
   type CatalogStats,
   type FetchReport,
 } from "@/lib/catalog";
@@ -24,7 +25,7 @@ function formatWhen(iso: string | null) {
 export function AdminFetch({ compact = false }: { compact?: boolean }) {
   const [stats, setStats] = useState<CatalogStats | null>(null);
   const [reports, setReports] = useState<FetchReport[] | null>(null);
-  const [busy, setBusy] = useState(false);
+  const [busy, setBusy] = useState<CatalogFetchMode | null>(null);
   const [error, setError] = useState<string | null>(null);
 
   async function loadStats() {
@@ -39,19 +40,19 @@ export function AdminFetch({ compact = false }: { compact?: boolean }) {
     void loadStats();
   }, []);
 
-  async function runFetch() {
+  async function runFetch(mode: CatalogFetchMode) {
     if (busy) return;
-    setBusy(true);
+    setBusy(mode);
     setError(null);
     try {
-      const result = await fetchCatalogs();
+      const result = await fetchCatalogs({ data: { mode } });
       setReports(result.sources);
       await loadStats();
       window.dispatchEvent(new Event("malsub:catalog"));
     } catch {
       setError("Fetch failed. Try again.");
     } finally {
-      setBusy(false);
+      setBusy(null);
     }
   }
 
@@ -63,18 +64,18 @@ export function AdminFetch({ compact = false }: { compact?: boolean }) {
         compact ? "p-4" : "p-5 sm:p-6",
       )}
     >
-      <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
+      <div className="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
         <div className="min-w-0">
           <p className="flex items-center gap-2 text-xs font-medium tracking-wide text-accent uppercase">
             <Database className="size-3.5" />
             Admin
           </p>
           <h2 className="mt-1 font-display text-lg font-semibold tracking-tight sm:text-xl">
-            Rescrape catalogs
+            Catalog fetch
           </h2>
-          <p className="mt-1 text-sm text-muted">
-            Reads each source index, upserts subtitle page URLs, and only
-            inserts titles that are new.
+          <p className="mt-1 max-w-xl text-sm text-muted">
+            Builds the title index for MSone, Movie Mirror, and Team GOAT.
+            Search and the Stremio addon only use what is stored here.
           </p>
           <p className="mt-2 font-mono text-xs tabular-nums text-subtle">
             {stats
@@ -82,16 +83,45 @@ export function AdminFetch({ compact = false }: { compact?: boolean }) {
               : "Loading catalog…"}
           </p>
         </div>
-        <Button
-          type="button"
-          onClick={() => void runFetch()}
-          disabled={busy}
-          className="w-full shrink-0 sm:w-auto"
-        >
-          {busy ? <LoaderCircle className="animate-spin" /> : <RefreshCw />}
-          {busy ? "Fetching" : "Fetch new titles"}
-        </Button>
+        <div className="flex w-full flex-col gap-2 sm:w-auto sm:flex-row lg:flex-col">
+          <Button
+            type="button"
+            onClick={() => void runFetch("full")}
+            disabled={Boolean(busy)}
+            className="w-full shrink-0 sm:w-auto"
+          >
+            {busy === "full" ? (
+              <LoaderCircle className="animate-spin" />
+            ) : (
+              <Library />
+            )}
+            {busy === "full" ? "Full fetch…" : "Full index"}
+          </Button>
+          <Button
+            type="button"
+            variant="outline"
+            onClick={() => void runFetch("incremental")}
+            disabled={Boolean(busy)}
+            className="w-full shrink-0 sm:w-auto"
+          >
+            {busy === "incremental" ? (
+              <LoaderCircle className="animate-spin" />
+            ) : (
+              <RefreshCw />
+            )}
+            {busy === "incremental" ? "Fetching…" : "New releases only"}
+          </Button>
+        </div>
       </div>
+
+      <p className="mt-3 text-xs text-subtle">
+        <span className="font-medium text-muted">Full index</span> — deep scrape
+        (sitemaps + many pages). Use once to fill ~thousands of titles, or when
+        the catalog looks incomplete.{" "}
+        <span className="font-medium text-muted">New releases only</span> — RSS +
+        recent pages; fast daily top-up. Auto/GitHub daily uses the same rules
+        for all three sources.
+      </p>
 
       {error ? <p className="mt-3 text-sm text-down">{error}</p> : null}
 
