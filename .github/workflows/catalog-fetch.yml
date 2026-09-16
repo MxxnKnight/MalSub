@@ -1,8 +1,7 @@
-# Daily catalog refresh for MalSUB.
-# - 06:00 IST (00:30 UTC)
-# - auto mode: full scrape when DB is sparse, else incremental (new entries)
-# - Runs on GitHub Actions network (better chance vs Cloudflare than Render)
-# - Upserts into the same MongoDB Render uses
+# Daily catalog refresh for MalSUB (all three sources in one job).
+# - 06:00 IST (00:30 UTC) → auto (full until ~1500 MSone titles, then incremental)
+# - Manual run: choose full | incremental | auto
+# - Admin UI: Full index / New releases buttons on the live app
 #
 # Required secret: MONGODB_URI
 
@@ -14,7 +13,7 @@ on:
   workflow_dispatch:
     inputs:
       mode:
-        description: "Fetch mode (auto = full first, then incremental)"
+        description: "full = deep index · incremental = new releases · auto = decide from DB counts"
         required: true
         default: auto
         type: choice
