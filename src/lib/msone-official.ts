@@ -13,6 +13,15 @@
  *   - series urls: https://addon.malayalamsubtitles.org/subfiles/<tt>/s<season>/<file>.srt?e=1&pid=<n>&tot=<n>&sig=<sig>
  * Unknown titles return { subtitles: [] }. Signatures are stable across
  * requests, but we still re-fetch on a short TTL to stay polite and fresh.
+ *
+ * URL canonicalization: for movies we strip everything down to the bare
+ * ?wpdmdl=<id> endpoint. That is their public download URL (the same one
+ * their own website's download button uses), it needs no signature, and it
+ * is served by the main domain — so it keeps working even if their addon
+ * server goes down, and it can't break from signature rotation. (Verified:
+ * bare ?wpdmdl= works; a tampered sig 403s, so never forward a bad sig.)
+ * Series /subfiles/ URLs can't be stripped (404 without a valid sig) and
+ * stay dependent on their addon server.
  */
 
 const OFFICIAL_BASE = "https://addon.malayalamsubtitles.org";
@@ -29,6 +38,28 @@ export type MsoneOfficialSubtitle = {
 // Short in-memory cache: polite to their server, signatures stay fresh.
 const cache = new Map<string, { at: number; value: MsoneOfficialSubtitle[] }>();
 const CACHE_TTL_MS = 15 * 60 * 1000;
+
+/**
+ * Canonicalize a relay URL to its most durable form.
+ * Movies: strip to the bare ?wpdmdl=<id> public download endpoint.
+ * Series: /subfiles/ URLs require a valid sig — keep as-is.
+ */
+export function canonicalMsoneFileUrl(url: string): string {
+  try {
+    const u = new URL(url);
+    const wpdmdl = u.searchParams.get("wpdmdl");
+    if (
+      wpdmdl &&
+      /^\d+$/.test(wpdmdl) &&
+      u.hostname === "malayalamsubtitles.org"
+    ) {
+      return `https://malayalamsubtitles.org/?wpdmdl=${wpdmdl}`;
+    }
+  } catch {
+    // fall through and return the original
+  }
+  return url;
+}
 
 export function msoneOfficialCacheSize(): number {
   return cache.size;
@@ -62,7 +93,7 @@ export async function fetchMsoneOfficial(
       if (s && typeof s.url === "string" && s.url.startsWith("http")) {
         clean.push({
           id: typeof s.id === "string" ? s.id : `${imdb}-${clean.length}`,
-          url: s.url,
+          url: canonicalMsoneFileUrl(s.url),
           lang: typeof s.lang === "string" ? s.lang : "mal",
           label: typeof s.label === "string" ? s.label : imdb,
         });
