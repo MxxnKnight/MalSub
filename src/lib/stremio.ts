@@ -1,6 +1,7 @@
 import { ADDON, SOURCES } from "@/lib/addon";
 import { cinemetaByImdb } from "@/lib/cinemeta";
 import { scoreHit } from "@/lib/match";
+import { fetchMsoneOfficial } from "@/lib/msone-official";
 import type { SearchHit, TitleKind } from "@/lib/search";
 
 export type StremioSubtitle = {
@@ -46,7 +47,13 @@ export async function subtitlesForRequest(origin: string, path: string) {
   if (!meta) return { subtitles: [] as StremioSubtitle[] };
 
   const { searchTitles } = await import("@/lib/catalog-store");
-  const rows = await searchTitles(meta.name);
+  // DB catalog + MSone's official addon in parallel. The official addon
+  // returns signed, directly-downloadable MSone URLs, which bypasses the
+  // Cloudflare block on malayalamsubtitles.org article pages.
+  const [rows, msoneOfficial] = await Promise.all([
+    searchTitles(meta.name),
+    fetchMsoneOfficial(parsed.kind, parsed.imdb, parsed.season, parsed.episode),
+  ]);
   const matches = rows
     .map((row) => ({
       row,
@@ -65,15 +72,35 @@ export async function subtitlesForRequest(origin: string, path: string) {
     .slice(0, 6);
 
   const base = origin.replace(/\/$/, "");
-  const subtitles: StremioSubtitle[] = matches.map(({ row }) => {
+  const subtitles: StremioSubtitle[] = [];
+
+  // 1. Official MSone relay first: exact IMDb match, signed file URLs.
+  //    When it returns hits, skip the DB's MSone post-page rows — they point
+  //    at Cloudflare-blocked pages and would 404 in /api/subtitle.
+  for (let i = 0; i < msoneOfficial.length; i += 1) {
+    const s = msoneOfficial[i];
+    subtitles.push({
+      id: `${ADDON.id}:msone:${parsed.imdb}:${i}`,
+      url: s.url,
+      lang: "mal",
+      name: `MSone · ${s.label}`,
+    } as StremioSubtitle);
+  }
+
+  // 2. DB catalog rows (Team GOAT, Movie Mirror, + MSone fallback rows).
+  const dbMatches =
+    msoneOfficial.length > 0
+      ? matches.filter(({ row }) => row.sourceId !== "msone")
+      : matches;
+  for (const { row } of dbMatches) {
     const source = SOURCES.find((item) => item.id === row.sourceId);
-    return {
+    subtitles.push({
       id: `${ADDON.id}:${row.sourceId}:${parsed.imdb}:${row.season ?? "m"}`,
       url: `${base}/api/subtitle?u=${encodeURIComponent(row.url)}`,
       lang: "mal",
       name: `${source?.name ?? row.sourceId} · ${row.title}`,
-    } as StremioSubtitle;
-  });
+    } as StremioSubtitle);
+  }
 
   return { subtitles };
 }
