@@ -241,12 +241,37 @@ function parseMmMarkdown(markdown: string): SearchHit[] {
   const seen = new Set<string>();
   const re = /\[([^\]]+)\]\((https?:\/\/moviemirrorsubtitles\.com\/[^)]+)\)/gi;
   for (const match of markdown.matchAll(re)) {
+    // Skip markdown image syntax: ![alt](url) — these are poster attachments, not posts
+    if (match.index > 0 && markdown[match.index - 1] === "!") continue;
     const title = stripTags(match[1] ?? "");
     const url = match[2];
     if (!title || !url || seen.has(url)) continue;
     if (/\/(category|tag|page)\//i.test(url)) continue;
+    // Skip direct image/attachment URLs that slipped through
+    if (/\.(jpe?g|png|webp|gif|avif|svg|bmp)(\?|#|$)/i.test(url)) continue;
     seen.add(url);
     hits.push(hit({ title, url, year: yearFrom(title) ?? yearFrom(url), kind: kindFrom(`${title} ${url}`) }));
+  }
+  return hits;
+}
+
+// Direct HTML parser for the /subtitles/ listing page.
+// Each release is a <div class="colle-col"> card with:
+//   <a href="<post-url>" class="sub-btn">Download</a>, <h3><title></h3>, <img poster>
+// This beats the Jina-markdown fallback: no proxy needed, no image-link noise, plus posters.
+function parseMmListing(html: string): SearchHit[] {
+  const hits: SearchHit[] = [];
+  const seen = new Set<string>();
+  const blocks = html.match(/<div class="colle-col">[\s\S]*?<\/div>\s*<\/div>/gi) ?? [];
+  for (const b of blocks) {
+    const href = b.match(/<a href="(https:\/\/moviemirrorsubtitles\.com\/[^"]+)" class="sub-btn"/)?.[1];
+    if (!href || seen.has(href)) continue;
+    seen.add(href);
+    const rawTitle = b.match(/<h3>([\s\S]*?)<\/h3>/)?.[1] ?? "";
+    const title = stripTags(rawTitle);
+    if (!title) continue;
+    const poster = b.match(/<img[^>]+src="(https:\/\/moviemirrorsubtitles\.com\/[^"]+)"/)?.[1] ?? null;
+    hits.push(hit({ title, url: href, year: yearFrom(title) ?? yearFrom(href), kind: kindFrom(`${title} ${href}`), poster }));
   }
   return hits;
 }
@@ -420,6 +445,17 @@ async function collectGoat(): Promise<{ items: SearchHit[]; note: string | null;
 
 async function collectMm(): Promise<{ items: SearchHit[]; note: string | null; ok: boolean }> {
   const seed = await loadMmSeed();
+  // Strategy 1: direct /subtitles/ listing HTML — clean cards with titles + posters, no proxy
+  try {
+    const page = await fetchText("https://moviemirrorsubtitles.com/subtitles/", 20000);
+    if (page.ok && !isBlockedBody(page.text)) {
+      const items = parseMmListing(page.text);
+      if (items.length > 40) {
+        return { items, ok: true, note: "Listing HTML (direct)" };
+      }
+    }
+  } catch {}
+  // Strategy 2: sitemap.xml
   try {
     const sitemap = await fetchTextWithFallback("https://moviemirrorsubtitles.com/sitemap.xml", 12000);
     if (sitemap.ok && (sitemap.text.includes("<url>") || sitemap.text.includes("http"))) {
@@ -433,6 +469,7 @@ async function collectMm(): Promise<{ items: SearchHit[]; note: string | null; o
       }
     }
   } catch {}
+  // Strategy 3: Jina reader markdown of the listing (image links filtered in parseMmMarkdown)
   try {
     const { text } = await fetchText("https://r.jina.ai/https://moviemirrorsubtitles.com/subtitles/", 12000);
     const live = parseMmMarkdown(text);
